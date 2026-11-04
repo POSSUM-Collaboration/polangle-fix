@@ -1,6 +1,7 @@
 """Tests for fix_polframe. These check the algebra and the plumbing. They cannot
 check the sign convention (chi_true = chi + gamma); that needs a source of known
 absolute angle."""
+
 from __future__ import annotations
 
 import astropy.units as u
@@ -18,7 +19,9 @@ def random_field(n: int, max_off: float = 5.0):
     ra0 = RNG.uniform(0, 360, n)
     dec0 = RNG.uniform(-89, 60, n)
     c0 = SkyCoord(ra0 * u.deg, dec0 * u.deg)
-    cs = c0.directional_offset_by(RNG.uniform(0, 360, n) * u.deg, RNG.uniform(0, max_off, n) * u.deg)
+    cs = c0.directional_offset_by(
+        RNG.uniform(0, 360, n) * u.deg, RNG.uniform(0, max_off, n) * u.deg
+    )
     return cs.ra.deg, cs.dec.deg, ra0, dec0
 
 
@@ -40,8 +43,12 @@ def test_gamma_matches_vector_projection():
 
 
 def test_gamma_zero_on_meridian_and_small_offset_limit():
-    assert fp.gamma_deg(np.array([10.0]), np.array([-50.0]), np.array([10.0]), np.array([-60.0]))[0] == pytest.approx(0, abs=1e-12)
-    g = fp.gamma_deg(np.array([4.0]), np.array([-84.0]), np.array([0.0]), np.array([-84.0]))[0]
+    assert fp.gamma_deg(
+        np.array([10.0]), np.array([-50.0]), np.array([10.0]), np.array([-60.0])
+    )[0] == pytest.approx(0, abs=1e-12)
+    g = fp.gamma_deg(
+        np.array([4.0]), np.array([-84.0]), np.array([0.0]), np.array([-84.0])
+    )[0]
     assert g == pytest.approx(4.0 * np.sin(np.radians(-84.0)), rel=0.01)
 
 
@@ -84,7 +91,9 @@ def test_wrap_angle():
 
 def test_skyoffset_matches_astropy():
     ra, dec, ra0, dec0 = random_field(2000)
-    lon, lat = SkyCoord(ra0 * u.deg, dec0 * u.deg).spherical_offsets_to(SkyCoord(ra * u.deg, dec * u.deg))
+    lon, lat = SkyCoord(ra0 * u.deg, dec0 * u.deg).spherical_offsets_to(
+        SkyCoord(ra * u.deg, dec * u.deg)
+    )
     l, m = fp.offsets_skyoffset(ra, dec, ra0, dec0)
     assert np.abs(l - lon.deg).max() < 1e-9
     assert np.abs(m - lat.deg).max() < 1e-9
@@ -116,9 +125,15 @@ def make_catalogue(tmp_path, n_per_tile=300):
     for name, (r0, d0) in centres.items():
         n = n_per_tile
         cs = SkyCoord(r0 * u.deg, d0 * u.deg).directional_offset_by(
-            RNG.uniform(0, 360, n) * u.deg, RNG.uniform(0, 3, n) * u.deg)
-        l, m = fp.offsets_skyoffset(cs.ra.deg, cs.dec.deg, np.full(n, r0), np.full(n, d0))
-        ras += list(cs.ra.deg); decs += list(cs.dec.deg); ls += list(l); ms += list(m)
+            RNG.uniform(0, 360, n) * u.deg, RNG.uniform(0, 3, n) * u.deg
+        )
+        l, m = fp.offsets_skyoffset(
+            cs.ra.deg, cs.dec.deg, np.full(n, r0), np.full(n, d0)
+        )
+        ras += list(cs.ra.deg)
+        decs += list(cs.dec.deg)
+        ls += list(l)
+        ms += list(m)
         tiles += [name] * n
     n = len(tiles)
     chi = RNG.uniform(0, 180, n)
@@ -126,14 +141,19 @@ def make_catalogue(tmp_path, n_per_tile=300):
     t = Table()
     t["ra"] = Column(ras, unit="deg", description="Right Ascension [ICRS]")
     t["dec"] = Column(decs, unit="deg", description="Declination [ICRS]")
-    t["l_tile_centre"] = Column(ls, unit="deg"); t["m_tile_centre"] = Column(ms, unit="deg")
+    t["l_tile_centre"] = Column(ls, unit="deg")
+    t["m_tile_centre"] = Column(ms, unit="deg")
     t["tile_id"] = Column(tiles, description="Tile ID")
-    t["polangle"] = Column(chi, unit="deg", description="Electric vector polarization angle")
+    t["polangle"] = Column(
+        chi, unit="deg", description="Electric vector polarization angle"
+    )
     t["derot_polangle"] = Column(chi, unit="deg")
-    t["stokesQ"] = Column(q, unit="Jy / beam"); t["stokesU"] = Column(uu, unit="Jy / beam")
+    t["stokesQ"] = Column(q, unit="Jy / beam")
+    t["stokesU"] = Column(uu, unit="Jy / beam")
     t["stokesQ_err"] = Column(RNG.uniform(1, 2, n), unit="Jy")
     t["stokesU_err"] = Column(RNG.uniform(1, 2, n), unit="Jy")
-    t["stokesQ_bkg"] = Column(q * 0.1, unit="Jy / beam"); t["stokesU_bkg"] = Column(uu * 0.1, unit="Jy / beam")
+    t["stokesQ_bkg"] = Column(q * 0.1, unit="Jy / beam")
+    t["stokesU_bkg"] = Column(uu * 0.1, unit="Jy / beam")
     t["flag"] = Column(RNG.uniform(size=n) > 0.5)
     t["name"] = Column([f"src{i}" for i in range(n)])
     t["polangle"][3] = np.nan  # a null
@@ -158,19 +178,33 @@ def test_end_to_end_preserves_everything(tmp_path):
             if card.keyword in skip or card.keyword in ("COMMENT", "HISTORY"):
                 continue
             assert hb[card.keyword] == card.value, card.keyword
-        assert [str(c.value) for c in ha.cards if c.keyword == "COMMENT"] == \
-               [str(c.value) for c in hb.cards if c.keyword == "COMMENT"]
+        assert [str(c.value) for c in ha.cards if c.keyword == "COMMENT"] == [
+            str(c.value) for c in hb.cards if c.keyword == "COMMENT"
+        ]
         assert hb["TFIELDS"] > n0
         assert hb["NAXIS1"] == ha["NAXIS1"] + 8 * (hb["TFIELDS"] - n0)
         # original bytes are identical, row by row
-        ra = np.frombuffer(np.asarray(a[1].data).tobytes(), np.uint8).reshape(len(orig), -1)
-        rb = np.frombuffer(np.asarray(b[1].data).tobytes(), np.uint8).reshape(len(orig), -1)
+        ra = np.frombuffer(np.asarray(a[1].data).tobytes(), np.uint8).reshape(
+            len(orig), -1
+        )
+        rb = np.frombuffer(np.asarray(b[1].data).tobytes(), np.uint8).reshape(
+            len(orig), -1
+        )
         assert (rb[:, : ra.shape[1]] == ra).all()
 
     res = Table.read(out)
-    for c in ("polangle_corr", "derot_polangle_corr", "stokesQ_corr", "stokesU_corr",
-              "stokesQ_err_corr", "stokesU_err_corr", "stokesQU_cov_corr",
-              "stokesQ_bkg_corr", "stokesU_bkg_corr", "pol_frame_gamma"):
+    for c in (
+        "polangle_corr",
+        "derot_polangle_corr",
+        "stokesQ_corr",
+        "stokesU_corr",
+        "stokesQ_err_corr",
+        "stokesU_err_corr",
+        "stokesQU_cov_corr",
+        "stokesQ_bkg_corr",
+        "stokesU_bkg_corr",
+        "pol_frame_gamma",
+    ):
         assert c in res.colnames
     assert res["polangle_corr"].unit == "deg"
     assert res["ra"].description == "Right Ascension [ICRS]"
@@ -182,7 +216,10 @@ def test_end_to_end_preserves_everything(tmp_path):
     assert np.abs(np.asarray(res["pol_frame_gamma"]) - g).max() < 1e-6
     assert np.abs(g).max() > 10  # the polar tile exercises the effect
     exp = fp.wrap_angle(np.asarray(orig["derot_polangle"]) + g, 0.0)
-    assert np.abs(fp.wrap180(2 * (np.asarray(res["derot_polangle_corr"]) - exp))).max() < 1e-5
+    assert (
+        np.abs(fp.wrap180(2 * (np.asarray(res["derot_polangle_corr"]) - exp))).max()
+        < 1e-5
+    )
     assert np.isnan(res["polangle_corr"][3])  # null stays null
 
     with pytest.raises(SystemExit):  # refuses to run twice

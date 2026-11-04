@@ -54,15 +54,17 @@ angle (for example 3C 286 placed off-axis) before release.
 Memory: roughly 3 GB for pass 1 on the full DR2 table, then a few hundred MB.
 Disk: the output is about the size of the input plus ~1 GB.
 """
+
 from __future__ import annotations
 
 import argparse
 import csv
 import re
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Mapping, Sequence
+from typing import Final
 
 import numpy as np
 from astropy import units as au
@@ -100,8 +102,18 @@ class Columns:
     u_bkg: str = "stokesU_bkg"
 
     def required(self, with_offsets: bool) -> list[str]:
-        out = [self.ra, self.dec, self.tile, self.q, self.u, self.q_err, self.u_err,
-               self.q_bkg, self.u_bkg, *self.angles]
+        out = [
+            self.ra,
+            self.dec,
+            self.tile,
+            self.q,
+            self.u,
+            self.q_err,
+            self.u_err,
+            self.q_bkg,
+            self.u_bkg,
+            *self.angles,
+        ]
         return out + ([self.l_off, self.m_off] if with_offsets else [])
 
 
@@ -219,11 +231,20 @@ class CentreFit:
 
 
 def fit_centres(
-    convention: str, ra: F64, dec: F64, l_off: F64, m_off: F64,
-    tile_idx: IntArr, n_tiles: int, valid: BoolArr, tol_arcsec: float,
+    convention: str,
+    ra: F64,
+    dec: F64,
+    l_off: F64,
+    m_off: F64,
+    tile_idx: IntArr,
+    n_tiles: int,
+    valid: BoolArr,
+    tol_arcsec: float,
 ) -> CentreFit:
     """Recover per-tile centres under one convention and measure consistency."""
-    ra0_r, dec0_r = recover_centre(convention, ra[valid], dec[valid], l_off[valid], m_off[valid])
+    ra0_r, dec0_r = recover_centre(
+        convention, ra[valid], dec[valid], l_off[valid], m_off[valid]
+    )
     idx = tile_idx[valid]
     ref = np.full(n_tiles, np.nan)
     present, first = np.unique(idx, return_index=True)
@@ -232,7 +253,8 @@ def fit_centres(
     ra0_t = (ref + group_reduce(rel, idx, n_tiles)) % 360.0
     dec0_t = group_reduce(dec0_r, idx, n_tiles)
     dev = 3600.0 * np.hypot(
-        wrap180(ra0_r - ra0_t[idx]) * np.cos(np.radians(dec0_t[idx])), dec0_r - dec0_t[idx]
+        wrap180(ra0_r - ra0_t[idx]) * np.cos(np.radians(dec0_t[idx])),
+        dec0_r - dec0_t[idx],
     )
     return CentreFit(convention, ra0_t, dec0_t, dev, float(np.mean(dev > tol_arcsec)))
 
@@ -265,36 +287,72 @@ def tile_index(raw_tile: NDArray[np.bytes_]) -> tuple[NDArray[np.str_], IntArr]:
 
 
 def choose_centres(
-    ra: F64, dec: F64, l_off: F64, m_off: F64, sep: F64 | None,
-    names: NDArray[np.str_], idx: IntArr, tol_arcsec: float,
+    ra: F64,
+    dec: F64,
+    l_off: F64,
+    m_off: F64,
+    sep: F64 | None,
+    names: NDArray[np.str_],
+    idx: IntArr,
+    tol_arcsec: float,
 ) -> tuple[CentreFit, BoolArr]:
     """Fit all conventions, report, and return the best (exits if none fits)."""
-    valid = np.isfinite(ra) & np.isfinite(dec) & np.isfinite(l_off) & np.isfinite(m_off) & (names[idx] != "")
-    fits_ = [fit_centres(c, ra, dec, l_off, m_off, idx, len(names), valid, tol_arcsec)
-             for c in CONVENTIONS]
+    valid = (
+        np.isfinite(ra)
+        & np.isfinite(dec)
+        & np.isfinite(l_off)
+        & np.isfinite(m_off)
+        & (names[idx] != "")
+    )
+    fits_ = [
+        fit_centres(c, ra, dec, l_off, m_off, idx, len(names), valid, tol_arcsec)
+        for c in CONVENTIONS
+    ]
     for f in fits_:
-        print(f"  convention {f.convention:10s}: {100 * f.frac_bad:7.3f}% rows > {tol_arcsec:g} arcsec from tile centre")
+        print(
+            f"  convention {f.convention:10s}: {100 * f.frac_bad:7.3f}% rows > {tol_arcsec:g} arcsec from tile centre"
+        )
     best = min(fits_, key=lambda f: f.frac_bad)
     if best.frac_bad > 1e-3:
-        sys.exit("no offset convention gives consistent tile centres; supply --boresights")
+        sys.exit(
+            "no offset convention gives consistent tile centres; supply --boresights"
+        )
     print(f"using convention: {best.convention}")
     if sep is not None:
         v = valid & np.isfinite(sep)
         mine = sep_deg(ra[v], dec[v], best.ra0[idx[v]], best.dec0[idx[v]])
         diff = np.abs(mine - sep[v])
-        print(f"  check vs separation column: median |diff| {np.median(diff):.2e} deg, max {diff.max():.2e} deg")
+        print(
+            f"  check vs separation column: median |diff| {np.median(diff):.2e} deg, max {diff.max():.2e} deg"
+        )
     return best, valid
 
 
-def write_audit(path: Path, names: NDArray[np.str_], ra0: F64, dec0: F64,
-                idx_valid: IntArr, dev: F64) -> None:
+def write_audit(
+    path: Path,
+    names: NDArray[np.str_],
+    ra0: F64,
+    dec0: F64,
+    idx_valid: IntArr,
+    dev: F64,
+) -> None:
     """CSV of recovered centres, with tile-name positions for comparison."""
     n = len(names)
     count = np.bincount(idx_valid, minlength=n)
     max_dev = group_reduce(dev, idx_valid, n, "max")
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["tile_id", "ra0", "dec0", "n_rows", "max_dev_arcsec", "name_ra", "name_dec"])
+        w.writerow(
+            [
+                "tile_id",
+                "ra0",
+                "dec0",
+                "n_rows",
+                "max_dev_arcsec",
+                "name_ra",
+                "name_dec",
+            ]
+        )
         for i, nm in enumerate(names):
             p = parse_tile_name(nm) or (float("nan"), float("nan"))
             w.writerow([nm, ra0[i], dec0[i], int(count[i]), max_dev[i], p[0], p[1]])
@@ -303,13 +361,18 @@ def write_audit(path: Path, names: NDArray[np.str_], ra0: F64, dec0: F64,
 def centres_from_file(path: str, names: NDArray[np.str_]) -> tuple[F64, F64]:
     """Per-tile centres from a CSV with columns tile_id, ra0, dec0 (deg)."""
     with open(path, newline="") as fh:
-        look = {r["tile_id"].strip(): (float(r["ra0"]), float(r["dec0"])) for r in csv.DictReader(fh)}
+        look = {
+            r["tile_id"].strip(): (float(r["ra0"]), float(r["dec0"]))
+            for r in csv.DictReader(fh)
+        }
     missing = [n for n in names if n and n not in look]
     if missing:
         sys.exit(f"{path}: no boresight for {len(missing)} tiles, e.g. {missing[:5]}")
     nan = (float("nan"), float("nan"))
-    return (np.array([look.get(n, nan)[0] for n in names]),
-            np.array([look.get(n, nan)[1] for n in names]))
+    return (
+        np.array([look.get(n, nan)[0] for n in names]),
+        np.array([look.get(n, nan)[1] for n in names]),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -329,17 +392,34 @@ def plan_columns(cols: Columns, has_err: bool) -> list[NewColumn]:
     plan = [NewColumn(n + SUFFIX, n) for n in cols.angles]
     plan += [NewColumn(n + SUFFIX, n) for n in (cols.q, cols.u, cols.q_bkg, cols.u_bkg)]
     if has_err:
-        plan += [NewColumn(cols.q_err + SUFFIX, cols.q_err),
-                 NewColumn(cols.u_err + SUFFIX, cols.u_err),
-                 NewColumn(COV_COL, cols.u_err, "Q-U covariance of the error, local-north frame",
-                           product_with=cols.q_err)]
-    plan.append(NewColumn(GAMMA_COL, None,
-                          "Rotation applied to reach local north (chi_true = chi + gamma)", "deg"))
+        plan += [
+            NewColumn(cols.q_err + SUFFIX, cols.q_err),
+            NewColumn(cols.u_err + SUFFIX, cols.u_err),
+            NewColumn(
+                COV_COL,
+                cols.u_err,
+                "Q-U covariance of the error, local-north frame",
+                product_with=cols.q_err,
+            ),
+        ]
+    plan.append(
+        NewColumn(
+            GAMMA_COL,
+            None,
+            "Rotation applied to reach local north (chi_true = chi + gamma)",
+            "deg",
+        )
+    )
     return plan
 
 
-def compute_new(cols: Columns, chunk: Mapping[str, F64], gamma: F64,
-                lo: Mapping[str, float], has_err: bool) -> list[F64]:
+def compute_new(
+    cols: Columns,
+    chunk: Mapping[str, F64],
+    gamma: F64,
+    lo: Mapping[str, float],
+    has_err: bool,
+) -> list[F64]:
     """Values of the new columns for one chunk, in ``plan_columns`` order."""
     out = [wrap_angle(chunk[n] + gamma, lo[n]) for n in cols.angles]
     for qn, un in ((cols.q, cols.u), (cols.q_bkg, cols.u_bkg)):
@@ -360,7 +440,9 @@ def squared_unit(a: str | None, b: str | None) -> str | None:
         return None
 
 
-def extend_header(hdr: fits.Header, plan: Sequence[NewColumn], source_label: str) -> fits.Header:
+def extend_header(
+    hdr: fits.Header, plan: Sequence[NewColumn], source_label: str
+) -> fits.Header:
     """Copy of ``hdr`` with the new columns added; every other card is untouched."""
     new = hdr.copy()
     n0 = int(hdr["TFIELDS"])
@@ -372,8 +454,10 @@ def extend_header(hdr: fits.Header, plan: Sequence[NewColumn], source_label: str
         if unit is None and j is not None:
             unit = hdr.get(f"TUNIT{j}")
         if nc.product_with:
-            unit = squared_unit(hdr.get(f"TUNIT{j}"),
-                                hdr.get(f"TUNIT{names.index(nc.product_with) + 1}"))
+            unit = squared_unit(
+                hdr.get(f"TUNIT{j}"),
+                hdr.get(f"TUNIT{names.index(nc.product_with) + 1}"),
+            )
         desc = nc.description
         if desc is None and j is not None:
             base = hdr.get(f"TCOMM{j}") or names[j - 1]
@@ -384,8 +468,11 @@ def extend_header(hdr: fits.Header, plan: Sequence[NewColumn], source_label: str
             cards.append((f"TUNIT{k}", str(unit).strip(), ""))
         if desc:
             cards.append((f"TCOMM{k}", desc, ""))
-    last = max(i for i, c in enumerate(new.cards)
-               if c.keyword.startswith(("TTYPE", "TFORM", "TUNIT", "TCOMM")))
+    last = max(
+        i
+        for i, c in enumerate(new.cards)
+        if c.keyword.startswith(("TTYPE", "TFORM", "TUNIT", "TCOMM"))
+    )
     for card in reversed(cards):
         new.insert(last + 1, card)
     new["NAXIS1"] = int(hdr["NAXIS1"]) + 8 * len(plan)
@@ -400,9 +487,13 @@ def angle_lower_edge(chi: F64, override: float | None, name: str) -> float:
     """Lower edge of the angle range; checks the data fit a 180 degree span."""
     lo_obs, hi_obs = float(np.nanmin(chi)), float(np.nanmax(chi))
     lo = override if override is not None else (-90.0 if lo_obs < 0 else 0.0)
-    print(f"  {name}: observed [{lo_obs:.3f}, {hi_obs:.3f}] deg -> wrap to [{lo:g}, {lo + 180:g})")
+    print(
+        f"  {name}: observed [{lo_obs:.3f}, {hi_obs:.3f}] deg -> wrap to [{lo:g}, {lo + 180:g})"
+    )
     if lo_obs < lo - 1e-6 or hi_obs > lo + 180.0 + 1e-6:
-        sys.exit(f"{name} does not fit [{lo:g}, {lo + 180:g}]; set --angle-min or check units")
+        sys.exit(
+            f"{name} does not fit [{lo:g}, {lo + 180:g}]; set --angle-min or check units"
+        )
     return lo
 
 
@@ -410,18 +501,32 @@ def angle_lower_edge(chi: F64, override: float | None, name: str) -> float:
 # Driver
 # --------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("catalogue", help="uncompressed FITS (gunzip first)")
     p.add_argument("output")
     p.add_argument("--tile-col", default=Columns.tile)
-    p.add_argument("--boresights", help="CSV with tile_id, ra0, dec0 (deg); overrides "
-                   "centres recovered from the l/m offsets")
-    p.add_argument("--centres-out", help="audit CSV path (default: <output>.tile_centres.csv)")
-    p.add_argument("--angle-min", type=float, default=None,
-                   help="lower edge of the angle range, 0 or -90 (default: inferred and printed)")
-    p.add_argument("--tol-arcsec", type=float, default=1.0,
-                   help="max within-tile scatter of the recovered centre")
+    p.add_argument(
+        "--boresights",
+        help="CSV with tile_id, ra0, dec0 (deg); overrides "
+        "centres recovered from the l/m offsets",
+    )
+    p.add_argument(
+        "--centres-out", help="audit CSV path (default: <output>.tile_centres.csv)"
+    )
+    p.add_argument(
+        "--angle-min",
+        type=float,
+        default=None,
+        help="lower edge of the angle range, 0 or -90 (default: inferred and printed)",
+    )
+    p.add_argument(
+        "--tol-arcsec",
+        type=float,
+        default=1.0,
+        help="max within-tile scatter of the recovered centre",
+    )
     p.add_argument("--chunk-rows", type=int, default=100_000)
     p.add_argument("--overwrite", action="store_true")
     return p
@@ -442,11 +547,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if int(hdr1.get("PCOUNT", 0)) != 0:
             sys.exit("variable-length columns (PCOUNT != 0) are not supported")
         n, naxis1 = int(hdr1["NAXIS2"]), int(hdr1["NAXIS1"])
-        names_all = [str(hdr1[f"TTYPE{i}"]).strip() for i in range(1, int(hdr1["TFIELDS"]) + 1)]
-        absent = [c for c in cols.required(args.boresights is None) if c not in names_all]
+        names_all = [
+            str(hdr1[f"TTYPE{i}"]).strip() for i in range(1, int(hdr1["TFIELDS"]) + 1)
+        ]
+        absent = [
+            c for c in cols.required(args.boresights is None) if c not in names_all
+        ]
         if absent:
             sys.exit(f"missing columns: {absent}")
-        clash = [c for c in names_all if c.endswith(SUFFIX) or c in (GAMMA_COL, COV_COL)]
+        clash = [
+            c for c in names_all if c.endswith(SUFFIX) or c in (GAMMA_COL, COV_COL)
+        ]
         if clash:
             sys.exit(f"already has output columns {clash[:4]}; refusing to run twice")
 
@@ -454,8 +565,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         rec_dtype = hdul[1].data.dtype
         if rec_dtype.itemsize != naxis1:
             sys.exit(f"record size {rec_dtype.itemsize} != NAXIS1 {naxis1}")
-        raw = np.memmap(args.catalogue, dtype=rec_dtype, mode="r", offset=dloc, shape=(n,))
-        rows = np.memmap(args.catalogue, dtype=np.uint8, mode="r", offset=dloc, shape=(n, naxis1))
+        raw = np.memmap(
+            args.catalogue, dtype=rec_dtype, mode="r", offset=dloc, shape=(n,)
+        )
+        rows = np.memmap(
+            args.catalogue, dtype=np.uint8, mode="r", offset=dloc, shape=(n, naxis1)
+        )
 
         def col(name: str) -> F64:
             return raw[name].astype(np.float64)
@@ -469,17 +584,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             source = f"file:{Path(args.boresights).name}"
         else:
             sep = col(cols.sep) if cols.sep in names_all else None
-            best, valid = choose_centres(ra, dec, col(cols.l_off), col(cols.m_off), sep,
-                                         tnames, tidx, args.tol_arcsec)
+            best, valid = choose_centres(
+                ra,
+                dec,
+                col(cols.l_off),
+                col(cols.m_off),
+                sep,
+                tnames,
+                tidx,
+                args.tol_arcsec,
+            )
             ra0_t, dec0_t = best.ra0, best.dec0
             audit = Path(args.centres_out or f"{args.output}.tile_centres.csv")
             write_audit(audit, tnames, ra0_t, dec0_t, tidx[valid], best.dev_arcsec)
             print(f"wrote tile-centre audit {audit}")
             source = f"offsets:{best.convention}"
         lo = {a: angle_lower_edge(col(a), args.angle_min, a) for a in cols.angles}
-        has_err = bool(np.isfinite(col(cols.q_err)).any() and np.isfinite(col(cols.u_err)).any())
+        has_err = bool(
+            np.isfinite(col(cols.q_err)).any() and np.isfinite(col(cols.u_err)).any()
+        )
         if not has_err:
-            print(f"note: {cols.q_err}/{cols.u_err} have no finite values; error columns skipped")
+            print(
+                f"note: {cols.q_err}/{cols.u_err} have no finite values; error columns skipped"
+            )
         del ra, dec
 
         plan = plan_columns(cols, has_err)
@@ -488,7 +615,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         # ---- pass 2: stream rows -------------------------------------------
         print(f"pass 2: writing {args.output} (+{len(plan)} columns)")
-        read_cols = [cols.ra, cols.dec, *cols.angles, cols.q, cols.u, cols.q_bkg, cols.u_bkg]
+        read_cols = [
+            cols.ra,
+            cols.dec,
+            *cols.angles,
+            cols.q,
+            cols.u,
+            cols.q_bkg,
+            cols.u_bkg,
+        ]
         if has_err:
             read_cols += [cols.q_err, cols.u_err]
         written = 0
@@ -499,11 +634,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 e = min(s + args.chunk_rows, n)
                 chunk = {c: raw[c][s:e].astype(np.float64) for c in read_cols}
                 ti = tidx[s:e]
-                gamma = gamma_deg(chunk[cols.ra], chunk[cols.dec], ra0_t[ti], dec0_t[ti])
+                gamma = gamma_deg(
+                    chunk[cols.ra], chunk[cols.dec], ra0_t[ti], dec0_t[ti]
+                )
                 new = np.stack(compute_new(cols, chunk, gamma, lo, has_err), axis=1)
                 buf = np.empty((e - s, naxis1 + extra), dtype=np.uint8)
                 buf[:, :naxis1] = rows[s:e]
-                buf[:, naxis1:] = np.ascontiguousarray(new.astype(">f8")).view(np.uint8).reshape(e - s, extra)
+                buf[:, naxis1:] = (
+                    np.ascontiguousarray(new.astype(">f8"))
+                    .view(np.uint8)
+                    .reshape(e - s, extra)
+                )
                 out.write(buf.tobytes())
                 written += buf.size
                 print(f"  {e}/{n}", end="\r")
