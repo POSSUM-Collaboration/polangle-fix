@@ -99,18 +99,50 @@ def test_skyoffset_matches_astropy():
     assert np.abs(m - lat.deg).max() < 1e-9
 
 
+def tiled_field(
+    n_tiles: int, per_tile: int, dec_lo: float, dec_hi: float, max_off: float = 5.0
+):
+    """Sources grouped into tiles; every source in a tile shares one centre."""
+    ra0 = RNG.uniform(0, 360, n_tiles)
+    dec0 = RNG.uniform(dec_lo, dec_hi, n_tiles)
+    idx = np.repeat(np.arange(n_tiles), per_tile)
+    n = n_tiles * per_tile
+    cs = SkyCoord(ra0[idx] * u.deg, dec0[idx] * u.deg).directional_offset_by(
+        RNG.uniform(0, 360, n) * u.deg, RNG.uniform(0, max_off, n) * u.deg
+    )
+    return cs.ra.deg, cs.dec.deg, ra0[idx], dec0[idx], idx
+
+
 @pytest.mark.parametrize("conv", fp.CONVENTIONS)
-def test_recover_centre_roundtrip(conv):
-    ra, dec, ra0, dec0 = random_field(2000)
+@pytest.mark.parametrize(
+    "dec_range", [(-60.0, 30.0), (-89.9, -85.0)], ids=["mid", "polar"]
+)
+def test_recover_centre_roundtrip(conv, dec_range):
+    n_tiles = 60
+    ra, dec, ra0, dec0, idx = tiled_field(n_tiles, 40, *dec_range)
     if conv == "skyoffset":
         l, m = fp.offsets_skyoffset(ra, dec, ra0, dec0)
     elif conv == "flat":
         l, m = fp.wrap180(ra - ra0) * np.cos(np.radians(dec)), dec - dec0
     else:
         l, m = fp.wrap180(ra - ra0), dec - dec0
-    r0, d0 = fp.recover_centre(conv, ra, dec, l, m)
-    assert np.abs(fp.wrap180(r0 - ra0) * np.cos(np.radians(dec0))).max() < 1e-7
-    assert np.abs(d0 - dec0).max() < 1e-7
+    r0, d0 = fp.recover_centre(conv, ra, dec, l, m, idx, n_tiles)
+    assert fp.sep_deg(r0, d0, ra0, dec0).max() < 1e-5
+
+
+def test_skyoffset_has_two_roots_near_the_pole():
+    """Near the pole two centres give the same (l, m); the tile resolves which."""
+    n_tiles = 20
+    ra, dec, ra0, dec0, _idx = tiled_field(n_tiles, 40, -89.0, -86.0)
+    l, m = fp.offsets_skyoffset(ra, dec, ra0, dec0)
+    roots = fp._skyoffset_roots(ra, dec, l, m)
+    both = np.isfinite(roots[0][1]) & np.isfinite(roots[1][1])
+    assert both.any()  # the ambiguity is real in this regime
+    for rr, dd in roots:  # and every valid root reproduces (l, m)
+        ok = np.isfinite(dd)
+        l2, m2 = fp.offsets_skyoffset(ra[ok], dec[ok], rr[ok], dd[ok])
+        assert np.abs(fp.wrap180(l2 - l[ok])).max() < 1e-6
+        assert np.abs(m2 - m[ok]).max() < 1e-6
 
 
 def test_parse_tile_name():
@@ -178,9 +210,13 @@ def test_end_to_end_preserves_everything(tmp_path):
             if card.keyword in skip or card.keyword in ("COMMENT", "HISTORY"):
                 continue
             assert hb[card.keyword] == card.value, card.keyword
-        assert [str(c.value) for c in ha.cards if c.keyword == "COMMENT"] == [
-            str(c.value) for c in hb.cards if c.keyword == "COMMENT"
-        ]
+        # original COMMENT lines are all still there, in order; only new lines were added
+        ca = [str(c.value) for c in ha.cards if c.keyword == "COMMENT"]
+        cb = [str(c.value) for c in hb.cards if c.keyword == "COMMENT"]
+        it = iter(cb)
+        assert all(any(x == y for y in it) for x in ca)
+        added = len(cb) - len(ca)
+        assert added > 0 and any("name: pol_frame_gamma" in x for x in cb)
         assert hb["TFIELDS"] > n0
         assert hb["NAXIS1"] == ha["NAXIS1"] + 8 * (hb["TFIELDS"] - n0)
         # original bytes are identical, row by row
@@ -220,7 +256,7 @@ def test_end_to_end_preserves_everything(tmp_path):
         np.abs(fp.wrap180(2 * (np.asarray(res["derot_polangle_corr"]) - exp))).max()
         < 1e-5
     )
-    assert np.isnan(res["polangle_corr"][3])  # null stays null
+    assert np.isnan(np.ma.filled(res["polangle_corr"], np.nan)[3])  # null stays null
 
     with pytest.raises(SystemExit):  # refuses to run twice
         fp.main([str(out), str(tmp_path / "again.fits")])

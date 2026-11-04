@@ -34,8 +34,9 @@ How it works, and why metadata is preserved
     original columns is re-encoded.
   * The output header is the input header verbatim (including TCOMM cards and
     the astropy-serialised column block) with NAXIS1/TFIELDS updated and cards
-    added for the new columns. New columns carry TUNIT and TCOMM but no entry
-    in the serialised block (no UCDs).
+    added for the new columns. The new columns get TUNIT/TCOMM cards and an
+    entry (unit, description) appended to the serialised block, so astropy
+    reads them back with metadata. They have no UCD.
   * New columns are appended at the end of the table.
 
 Boresight (assumptions to be aware of)
@@ -59,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import re
 import sys
 from collections.abc import Mapping, Sequence
@@ -69,6 +71,7 @@ from typing import Final
 import numpy as np
 from astropy import units as au
 from astropy.io import fits
+from astropy.table import Column, Table
 from numpy.typing import NDArray
 
 F64 = NDArray[np.float64]
@@ -179,8 +182,77 @@ def offsets_skyoffset(ra: F64, dec: F64, ra0: F64, dec0: F64) -> tuple[F64, F64]
     return np.degrees(np.arctan2(y, xx)), np.degrees(np.arcsin(np.clip(zz, -1.0, 1.0)))
 
 
+def _skyoffset_roots(
+    ra: F64, dec: F64, l_off: F64, m_off: F64
+) -> list[tuple[F64, F64]]:
+    """Both tile centres consistent with a source's sky-offset (l, m).
+
+    With w the source's unit vector in the offset frame, the forward map gives
+    w_y = cos(dec) sin(ra - ra0) and sin(dec) = w_x sin(dec0) + w_z cos(dec0).
+    The second equation has two roots for dec0, and both reproduce (l, m)
+    exactly. Roots outside [-90, 90] are returned as NaN. Away from the poles
+    only one root is valid; near the poles (|dec0| above ~85 deg) both can be.
+    """
+    lr, mr = np.radians(l_off), np.radians(m_off)
+    wx, wy, wz = np.cos(mr) * np.cos(lr), np.cos(mr) * np.sin(lr), np.sin(mr)
+    phi = np.degrees(np.arctan2(wx, wz))
+    amp = np.hypot(wx, wz)
+    theta = np.degrees(np.arccos(np.clip(np.sin(np.radians(dec)) / amp, -1.0, 1.0)))
+    roots: list[tuple[F64, F64]] = []
+    for dec0 in (wrap180(phi + theta), wrap180(phi - theta)):
+        ok = np.abs(dec0) <= 90.0 + 1e-9
+        d0 = np.radians(dec0)
+        xp = wx * np.cos(d0) - wz * np.sin(d0)
+        ra0 = (ra - np.degrees(np.arctan2(wy, xp))) % 360.0
+        roots.append((np.where(ok, ra0, np.nan), np.where(ok, dec0, np.nan)))
+    return roots
+
+
+def _resolve_roots(
+    roots: Sequence[tuple[F64, F64]],
+    tile_idx: IntArr,
+    n_tiles: int,
+    tol_deg: float = 0.01,
+) -> tuple[F64, F64]:
+    """Choose one root per row using the fact that a tile has a single centre.
+
+    The two roots of each tile's first row are the hypotheses. The one that
+    most rows of the tile can reproduce (with either of their roots) wins, and
+    every row then takes the root nearest to it.
+    """
+    present, first = np.unique(tile_idx, return_index=True)
+    hyps: list[tuple[F64, F64]] = []
+    scores: list[F64] = []
+    for rr, dd in roots:
+        hra, hdec = np.full(n_tiles, np.nan), np.full(n_tiles, np.nan)
+        hra[present], hdec[present] = rr[first], dd[first]
+        near = np.fmin(
+            *(sep_deg(r, d, hra[tile_idx], hdec[tile_idx]) for r, d in roots)
+        )
+        hyps.append((hra, hdec))
+        scores.append(
+            np.bincount(tile_idx, weights=(near < tol_deg), minlength=n_tiles)
+        )
+    use_b = scores[1] > scores[0]
+    hra = np.where(use_b, hyps[1][0], hyps[0][0])[tile_idx]
+    hdec = np.where(use_b, hyps[1][1], hyps[0][1])[tile_idx]
+    sa = np.nan_to_num(sep_deg(*roots[0], hra, hdec), nan=np.inf)
+    sb = np.nan_to_num(sep_deg(*roots[1], hra, hdec), nan=np.inf)
+    pick_b = sb < sa
+    return (
+        np.where(pick_b, roots[1][0], roots[0][0]),
+        np.where(pick_b, roots[1][1], roots[0][1]),
+    )
+
+
 def recover_centre(
-    convention: str, ra: F64, dec: F64, l_off: F64, m_off: F64, n_iter: int = 30
+    convention: str,
+    ra: F64,
+    dec: F64,
+    l_off: F64,
+    m_off: F64,
+    tile_idx: IntArr,
+    n_tiles: int,
 ) -> tuple[F64, F64]:
     """Invert an offset convention to get the per-row tile centre (deg).
 
@@ -188,21 +260,18 @@ def recover_centre(
       radec      l = ra - ra0,                m = dec - dec0
       flat       l = (ra - ra0) cos(dec),     m = dec - dec0
       skyoffset  l, m = astropy spherical_offsets_to
+
+    ``tile_idx`` (values below ``n_tiles``) says which rows share a centre. It
+    is only used by ``skyoffset``, to pick between the two polar roots.
     """
     if convention == "radec":
         return (ra - l_off) % 360.0, dec - m_off
-    flat_ra0 = (ra - l_off / np.cos(np.radians(dec))) % 360.0
-    flat_dec0 = dec - m_off
     if convention == "flat":
-        return flat_ra0, flat_dec0
-    if convention != "skyoffset":
-        raise ValueError(f"unknown convention {convention!r}")
-    ra0, dec0 = flat_ra0, flat_dec0
-    for _ in range(n_iter):
-        lp, mp = offsets_skyoffset(ra, dec, ra0, dec0)
-        ra0 = ra0 + wrap180(lp - l_off) / np.cos(np.radians(dec0))
-        dec0 = dec0 + (mp - m_off)
-    return ra0 % 360.0, dec0
+        return (ra - l_off / np.cos(np.radians(dec))) % 360.0, dec - m_off
+    if convention == "skyoffset":
+        roots = _skyoffset_roots(ra, dec, l_off, m_off)
+        return _resolve_roots(roots, tile_idx, n_tiles)
+    raise ValueError(f"unknown convention {convention!r}")
 
 
 CONVENTIONS: Final[tuple[str, ...]] = ("skyoffset", "flat", "radec")
@@ -242,10 +311,10 @@ def fit_centres(
     tol_arcsec: float,
 ) -> CentreFit:
     """Recover per-tile centres under one convention and measure consistency."""
-    ra0_r, dec0_r = recover_centre(
-        convention, ra[valid], dec[valid], l_off[valid], m_off[valid]
-    )
     idx = tile_idx[valid]
+    ra0_r, dec0_r = recover_centre(
+        convention, ra[valid], dec[valid], l_off[valid], m_off[valid], idx, n_tiles
+    )
     ref = np.full(n_tiles, np.nan)
     present, first = np.unique(idx, return_index=True)
     ref[present] = ra0_r[first]
@@ -440,6 +509,53 @@ def squared_unit(a: str | None, b: str | None) -> str | None:
         return None
 
 
+SER_BEGIN: Final[str] = "--BEGIN-ASTROPY-SERIALIZED-COLUMNS--"
+SER_END: Final[str] = "--END-ASTROPY-SERIALIZED-COLUMNS--"
+
+
+def serialized_lines(
+    entries: Sequence[tuple[str, str | None, str | None]],
+) -> list[str]:
+    """Lines astropy writes in its serialised-column block for these columns.
+
+    ``entries`` are (name, unit, description). Astropy reads units and
+    descriptions from this block, so the new columns need entries in it to show
+    their descriptions when the file is read back into a Table.
+    """
+    t = Table()
+    for name, unit, desc in entries:
+        t[name] = Column(np.zeros(1), unit=unit or None, description=desc)
+    buf = io.BytesIO()
+    t.write(buf, format="fits")  # table_to_hdu alone omits the block
+    buf.seek(0)
+    with fits.open(buf) as hdul:
+        lines = [str(c.value) for c in hdul[1].header.cards if c.keyword == "COMMENT"]
+    if "datatype:" not in lines:
+        return []
+    start = lines.index("datatype:") + 1
+    stops = [
+        i for i, v in enumerate(lines) if i >= start and v in ("meta: !!omap", SER_END)
+    ]
+    return lines[start : stops[0]] if stops else []
+
+
+def splice_serialized(hdr: fits.Header, lines: Sequence[str]) -> bool:
+    """Insert ``lines`` at the end of the block's ``datatype:`` list, in place.
+
+    Returns False (header untouched) if the header has no serialised block.
+    """
+    cards = hdr.cards
+    com = [(i, str(c.value)) for i, c in enumerate(cards) if c.keyword == "COMMENT"]
+    try:
+        d = next(i for i, v in com if v == "datatype:")
+        end = next(i for i, v in com if i > d and v in ("meta: !!omap", SER_END))
+    except StopIteration:
+        return False
+    for line in reversed(lines):
+        hdr.insert(end, ("COMMENT", line))
+    return True
+
+
 def extend_header(
     hdr: fits.Header, plan: Sequence[NewColumn], source_label: str
 ) -> fits.Header:
@@ -448,6 +564,7 @@ def extend_header(
     n0 = int(hdr["TFIELDS"])
     names = [str(hdr[f"TTYPE{i}"]).strip() for i in range(1, n0 + 1)]
     cards: list[tuple[str, object, str]] = []
+    resolved: list[tuple[str, str | None, str | None]] = []
     for k, nc in enumerate(plan, start=n0 + 1):
         j = names.index(nc.source) + 1 if nc.source else None
         unit = nc.unit
@@ -468,6 +585,7 @@ def extend_header(
             cards.append((f"TUNIT{k}", str(unit).strip(), ""))
         if desc:
             cards.append((f"TCOMM{k}", desc, ""))
+        resolved.append((nc.name, str(unit).strip() if unit else None, desc))
     last = max(
         i
         for i, c in enumerate(new.cards)
@@ -475,6 +593,7 @@ def extend_header(
     )
     for card in reversed(cards):
         new.insert(last + 1, card)
+    splice_serialized(new, serialized_lines(resolved))
     new["NAXIS1"] = int(hdr["NAXIS1"]) + 8 * len(plan)
     new["TFIELDS"] = n0 + len(plan)
     new["POLFRAME"] = ("LOCAL_NORTH_COLS_ADDED", "_corr columns added by fix_polframe")
