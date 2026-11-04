@@ -40,13 +40,31 @@ How it works, and why metadata is preserved
   * New columns are appended at the end of the table.
 
 Boresight (assumptions to be aware of)
-  * ``tile_id`` names the field whose cube supplied each row's Q/U.
+  * ``tile_id`` names the field whose cube supplied each row's Q/U. arrakis
+    computes the offset columns per ``field_name``; if that column exists and
+    disagrees with ``tile_id`` for any row the script says so (use --tile-col).
   * The pointing centre of each tile is recovered from ``l_tile_centre`` and
     ``m_tile_centre`` (angular offsets of the source from the tile centre).
     Every candidate offset convention is tested and the one with consistent
-    centres within each tile is used; the script stops if none is.
+    centres within each tile is used; the script stops if none is. The
+    conventions are:
+      arc        l = sep sin(PA - rot), m = sep cos(PA - rot), with a frame
+                 rotation ``rot`` fitted per tile. This is what arrakis
+                 ``update_tile_separations`` writes since 2024-07-15, with
+                 rot = 45 deg + POL_AXIS of the field (0 for POL_AXIS = -45).
+      skyoffset  astropy ``spherical_offsets_to`` from the centre
+      flat       l = (ra - ra0) cos(dec), m = dec - dec0
+      radec      l = ra - ra0, m = dec - dec0
+    Catalogues built with arrakis between 2024-06-25 and 2024-07-15 hold
+    ``spherical_offsets_to`` from the *source* to the centre (sign reversed);
+    no convention fits those, so supply --boresights.
   * The recovered centre is the tile centre, which may differ from the true
-    ASKAP boresight of the SBID. Use --boresights to supply true centres.
+    ASKAP boresight of the SBID. Use --boresights to supply true centres
+    (RA_DEG/DEC_DEG of the field in the RACS database is the right source).
+  * Every tile that has rows must end up with a finite centre; the script
+    stops otherwise, so no row can silently receive NaN corrections.
+  * CHECKSUM/DATASUM cards are dropped from both output headers because the
+    data they describe change. The primary HDU must carry no data.
 
 Sign convention (FRAME_SIGN): chi_true = chi_measured + gamma. This follows the
 report but is not verified. Check it once against a source of known absolute
@@ -63,6 +81,7 @@ import csv
 import io
 import re
 import sys
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -182,6 +201,189 @@ def offsets_skyoffset(ra: F64, dec: F64, ra0: F64, dec0: F64) -> tuple[F64, F64]
     return np.degrees(np.arctan2(y, xx)), np.degrees(np.arcsin(np.clip(zz, -1.0, 1.0)))
 
 
+def position_angle_deg(ra0: F64, dec0: F64, ra: F64, dec: F64) -> F64:
+    """Position angle (deg, east of north) of (ra, dec) seen from (ra0, dec0).
+
+    Matches astropy's ``SkyCoord.position_angle``.
+    """
+    a0, d0, a, d = (np.radians(x) for x in (ra0, dec0, ra, dec))
+    dra = a - a0
+    x = np.sin(d) * np.cos(d0) - np.cos(d) * np.sin(d0) * np.cos(dra)
+    y = np.sin(dra) * np.cos(d)
+    return np.degrees(np.arctan2(y, x))
+
+
+def offset_by_deg(ra: F64, dec: F64, pa: F64, sep: F64) -> tuple[F64, F64]:
+    """Point ``sep`` degrees from (ra, dec) along position angle ``pa``.
+
+    Matches astropy's ``SkyCoord.directional_offset_by``. All in degrees.
+    """
+    d, p, s = (np.radians(x) for x in (dec, pa, sep))
+    cos_b = np.sin(d) * np.cos(s) + np.cos(d) * np.sin(s) * np.cos(p)
+    xsin = np.sin(s) * np.sin(p) * np.cos(d)
+    xcos = np.cos(s) - cos_b * np.sin(d)
+    da = np.arctan2(xsin, xcos)
+    at_pole = np.cos(d) < 1e-12  # ra is arbitrary there; copy astropy's choice
+    da = np.where(at_pole, np.where(d > 0, np.pi - p, p), da)
+    return (ra + np.degrees(da)) % 360.0, np.degrees(np.arcsin(np.clip(cos_b, -1.0, 1.0)))
+
+
+def offsets_arc(ra: F64, dec: F64, ra0: F64, dec0: F64, rot: F64 | float = 0.0) -> tuple[F64, F64]:
+    """ARC offsets of (ra, dec) from (ra0, dec0) in a frame rotated by ``rot``.
+
+    l = sep sin(PA - rot), m = sep cos(PA - rot), all in degrees, where sep
+    and PA are the separation and position angle of the source seen from the
+    centre. This is what arrakis ``update_tile_separations`` writes, with
+    rot = 45 deg + POL_AXIS of the field.
+    """
+    sep = sep_deg(ra, dec, ra0, dec0)
+    t = np.radians(position_angle_deg(ra0, dec0, ra, dec) - rot)
+    return sep * np.sin(t), sep * np.cos(t)
+
+
+def _arc_centre(
+    ra: F64,
+    dec: F64,
+    l_off: F64,
+    m_off: F64,
+    rot: F64,
+    psi0: F64 | None = None,
+    n_iter: int = 20,
+) -> tuple[F64, F64]:
+    """Invert ``offsets_arc`` row by row, given the frame rotation (deg).
+
+    The centre lies ``sep`` away from the source along some direction psi
+    (the back-azimuth), chosen so that the source is at position angle PA as
+    seen from the centre. psi is found by Newton's method with a numerical
+    derivative, starting from ``psi0`` or from PA + 180 (exact on a plane).
+    Within ``sep`` of a pole there can be two solutions; pass ``psi0`` (for
+    example the direction towards an independently known centre) to pick.
+    """
+    sep = np.hypot(l_off, m_off)
+    pa = np.degrees(np.arctan2(l_off, m_off)) + rot  # source seen from centre
+    psi = pa + 180.0 if psi0 is None else np.array(psi0, dtype=np.float64)
+    h = 1e-4  # deg, finite-difference step
+
+    def miss(p: F64) -> F64:
+        r0, d0 = offset_by_deg(ra, dec, p, sep)
+        return wrap180(position_angle_deg(r0, d0, ra, dec) - pa)
+
+    for _ in range(n_iter):
+        g = miss(psi)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            step = g * h / (miss(psi + h) - g)
+        step = np.where(np.isfinite(step), np.clip(step, -90.0, 90.0), 0.0)
+        psi = psi - step
+        if np.nanmax(np.abs(step), initial=0.0) < 1e-12:
+            break
+    ra0, dec0 = offset_by_deg(ra, dec, psi, sep)
+    at_source = sep < 1e-12  # psi is meaningless; the centre is the source
+    return np.where(at_source, ra, ra0), np.where(at_source, dec, dec0)
+
+
+def _tile_mean_dir(ra0: F64, dec0: F64, idx: IntArr, n: int) -> tuple[F64, F64]:
+    """Mean direction (deg) of the finite (ra0, dec0) in each group 0..n-1."""
+    r, d = np.radians(ra0), np.radians(dec0)
+    v = np.stack([np.cos(d) * np.cos(r), np.cos(d) * np.sin(r), np.sin(d)])
+    ok = np.isfinite(v).all(axis=0)
+    x, y, z = (np.bincount(idx[ok], weights=v[k][ok], minlength=n) for k in range(3))
+    norm = np.sqrt(x * x + y * y + z * z)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dec = np.degrees(np.arcsin(np.clip(z / norm, -1.0, 1.0)))
+    return np.degrees(np.arctan2(y, x)) % 360.0, dec
+
+
+def tile_median_centre(
+    ra0_r: F64, dec0_r: F64, idx: IntArr, n: int
+) -> tuple[F64, F64]:
+    """Per-group median of per-row centres (deg), robust to RA wrap and NaNs.
+
+    RA is taken relative to the first finite row of the group so that a group
+    straddling RA = 0 does not average to 180.
+    """
+    fin = np.isfinite(ra0_r) & np.isfinite(dec0_r)
+    ref = np.full(n, np.nan)
+    present, first = np.unique(idx[fin], return_index=True)
+    ref[present] = ra0_r[fin][first]
+    rel = wrap180(ra0_r - ref[idx])
+    ra0_t = (ref + group_reduce(rel, idx, n)) % 360.0
+    return ra0_t, group_reduce(dec0_r, idx, n)
+
+
+def fit_arc_frame(
+    ra: F64,
+    dec: F64,
+    l_off: F64,
+    m_off: F64,
+    tile_idx: IntArr,
+    n_tiles: int,
+    max_rows: int = 300,
+    n_iter: int = 15,
+    max_stages: int = 8,
+) -> tuple[F64, F64, F64]:
+    """Frame rotation and centre of the ``arc`` convention, per tile (deg).
+
+    hypot(l, m) is the separation from the centre whatever the rotation, so
+    the centre is found first, by least-squares trilateration on the sphere
+    (Gauss-Newton from the centroid of the tile's sources, on up to
+    ``max_rows`` rows per tile). Rows whose residual is far outside the
+    robust scatter are dropped and the fit repeated until the kept set is
+    stable, so a minority of rows with wrong offsets cannot bias it. The
+    rotation is then the median over kept rows of
+    PA(centre -> source) - atan2(l, m).
+
+    Returns (rotation, centre ra, centre dec); NaN for tiles without rows.
+    """
+    order = np.argsort(tile_idx, kind="stable")
+    starts = np.searchsorted(tile_idx[order], np.arange(n_tiles + 1))
+    rank = np.arange(len(order)) - starts[tile_idx[order]]
+    keep = order[rank < max_rows]
+    r, d, l, m, idx = ra[keep], dec[keep], l_off[keep], m_off[keep], tile_idx[keep]
+    sep = np.hypot(l, m)
+    use = np.isfinite(sep)
+    c_ra, c_dec = _tile_mean_dir(r, d, idx, n_tiles)
+
+    def residual() -> tuple[F64, F64]:
+        """Distance residual (deg) and position angle (rad) of each row."""
+        f = sep_deg(c_ra[idx], c_dec[idx], r, d) - sep
+        return f, np.radians(position_angle_deg(c_ra[idx], c_dec[idx], r, d))
+
+    for _stage in range(max_stages):
+        for _ in range(n_iter):
+            f, th = residual()
+            w = use.astype(np.float64)
+            sx, cx = np.sin(th), np.cos(th)  # unit vector centre -> source
+            sxx = np.bincount(idx, weights=w * sx * sx, minlength=n_tiles)
+            sxy = np.bincount(idx, weights=w * sx * cx, minlength=n_tiles)
+            syy = np.bincount(idx, weights=w * cx * cx, minlength=n_tiles)
+            bx = np.bincount(idx, weights=w * sx * f, minlength=n_tiles)
+            by = np.bincount(idx, weights=w * cx * f, minlength=n_tiles)
+            det = sxx * syy - sxy * sxy
+            with np.errstate(invalid="ignore", divide="ignore"):
+                dx = (syy * bx - sxy * by) / det  # east component of the move
+                dy = (sxx * by - sxy * bx) / det  # north component
+            step = np.hypot(dx, dy)
+            ok = np.isfinite(step) & (step > 0)
+            n_ra, n_dec = offset_by_deg(c_ra, c_dec, np.degrees(np.arctan2(dx, dy)), step)
+            c_ra, c_dec = np.where(ok, n_ra, c_ra), np.where(ok, n_dec, c_dec)
+            if not ok.any() or step[ok].max() < 1e-13:
+                break
+        f, _ = residual()  # drop rows that do not fit, refit without them
+        scale = 1.4826 * group_reduce(np.abs(np.where(use, f, np.nan)), idx, n_tiles)
+        still = use & (np.abs(f) <= 5.0 * scale[idx] + 1e-7)
+        if (still == use).all():
+            break
+        use = still
+    rot_row = wrap180(np.degrees(residual()[1]) - np.degrees(np.arctan2(l, m)))
+    rot_row = np.where(use, rot_row, np.nan)
+    ref = np.full(n_tiles, np.nan)
+    present, first = np.unique(idx[use], return_index=True)
+    ref[present] = rot_row[use][first]
+    rot = (ref + group_reduce(wrap180(rot_row - ref[idx]), idx, n_tiles)) % 360.0
+    empty = np.bincount(idx[use], minlength=n_tiles) == 0
+    return rot, np.where(empty, np.nan, c_ra), np.where(empty, np.nan, c_dec)
+
+
 def _skyoffset_roots(
     ra: F64, dec: F64, l_off: F64, m_off: F64
 ) -> list[tuple[F64, F64]]:
@@ -216,16 +418,17 @@ def _resolve_roots(
 ) -> tuple[F64, F64]:
     """Choose one root per row using the fact that a tile has a single centre.
 
-    The two roots of each tile's first row are the hypotheses. The one that
-    most rows of the tile can reproduce (with either of their roots) wins, and
-    every row then takes the root nearest to it.
+    The two roots of each tile's first row with a finite root are the
+    hypotheses. The one that most rows of the tile can reproduce (with either
+    of their roots) wins, and every row then takes the root nearest to it.
     """
-    present, first = np.unique(tile_idx, return_index=True)
+    fin = np.isfinite(roots[0][1]) | np.isfinite(roots[1][1])
+    present, first = np.unique(tile_idx[fin], return_index=True)
     hyps: list[tuple[F64, F64]] = []
     scores: list[F64] = []
     for rr, dd in roots:
         hra, hdec = np.full(n_tiles, np.nan), np.full(n_tiles, np.nan)
-        hra[present], hdec[present] = rr[first], dd[first]
+        hra[present], hdec[present] = rr[fin][first], dd[fin][first]
         near = np.fmin(
             *(sep_deg(r, d, hra[tile_idx], hdec[tile_idx]) for r, d in roots)
         )
@@ -253,40 +456,51 @@ def recover_centre(
     m_off: F64,
     tile_idx: IntArr,
     n_tiles: int,
-) -> tuple[F64, F64]:
+) -> tuple[F64, F64, F64 | None]:
     """Invert an offset convention to get the per-row tile centre (deg).
 
     Conventions:
       radec      l = ra - ra0,                m = dec - dec0
       flat       l = (ra - ra0) cos(dec),     m = dec - dec0
       skyoffset  l, m = astropy spherical_offsets_to
+      arc        l = sep sin(PA - rot), m = sep cos(PA - rot)  (arrakis)
 
-    ``tile_idx`` (values below ``n_tiles``) says which rows share a centre. It
-    is only used by ``skyoffset``, to pick between the two polar roots.
+    ``tile_idx`` (values below ``n_tiles``) says which rows share a centre.
+    ``skyoffset`` uses it to pick between the two polar roots; ``arc`` uses
+    it to fit the frame rotation of each tile, which is returned as the third
+    element (per tile, degrees; None for the other conventions).
     """
     if convention == "radec":
-        return (ra - l_off) % 360.0, dec - m_off
+        return (ra - l_off) % 360.0, dec - m_off, None
     if convention == "flat":
-        return (ra - l_off / np.cos(np.radians(dec))) % 360.0, dec - m_off
+        return (ra - l_off / np.cos(np.radians(dec))) % 360.0, dec - m_off, None
     if convention == "skyoffset":
         roots = _skyoffset_roots(ra, dec, l_off, m_off)
-        return _resolve_roots(roots, tile_idx, n_tiles)
+        return (*_resolve_roots(roots, tile_idx, n_tiles), None)
+    if convention == "arc":
+        rot, c_ra, c_dec = fit_arc_frame(ra, dec, l_off, m_off, tile_idx, n_tiles)
+        # seed each row's inversion with the direction to its tile's centre,
+        # which picks the right solution for rows within reach of a pole
+        psi0 = position_angle_deg(ra, dec, c_ra[tile_idx], c_dec[tile_idx])
+        return (*_arc_centre(ra, dec, l_off, m_off, rot[tile_idx], psi0), rot)
     raise ValueError(f"unknown convention {convention!r}")
 
 
-CONVENTIONS: Final[tuple[str, ...]] = ("skyoffset", "flat", "radec")
+CONVENTIONS: Final[tuple[str, ...]] = ("arc", "skyoffset", "flat", "radec")
 
 
 def group_reduce(values: F64, idx: IntArr, n: int, fn: str = "median") -> F64:
-    """Median or max of ``values`` for each group 0..n-1 (NaN if empty)."""
+    """Median or max of the finite ``values`` in each group 0..n-1 (NaN if none)."""
     order = np.argsort(idx, kind="stable")
     sv = values[order]
     bounds = np.searchsorted(idx[order], np.arange(n + 1))
-    f = np.median if fn == "median" else np.max
+    f = np.nanmedian if fn == "median" else np.nanmax
     out = np.full(n, np.nan)
-    for i in range(n):
-        if bounds[i + 1] > bounds[i]:
-            out[i] = f(sv[bounds[i] : bounds[i + 1]])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN groups
+        for i in range(n):
+            if bounds[i + 1] > bounds[i]:
+                out[i] = f(sv[bounds[i] : bounds[i + 1]])
     return out
 
 
@@ -296,7 +510,8 @@ class CentreFit:
     ra0: F64  # per tile
     dec0: F64  # per tile
     dev_arcsec: F64  # per valid row: its own centre vs its tile's
-    frac_bad: float  # fraction of valid rows deviating by more than tol
+    frac_bad: float  # fraction of valid rows deviating by more than tol, or NaN
+    rot: F64 | None = None  # per tile frame rotation (arc convention only)
 
 
 def fit_centres(
@@ -310,22 +525,22 @@ def fit_centres(
     valid: BoolArr,
     tol_arcsec: float,
 ) -> CentreFit:
-    """Recover per-tile centres under one convention and measure consistency."""
+    """Recover per-tile centres under one convention and measure consistency.
+
+    A row whose recovered centre is not finite counts as inconsistent, so a
+    convention cannot score well by failing to produce centres.
+    """
     idx = tile_idx[valid]
-    ra0_r, dec0_r = recover_centre(
+    ra0_r, dec0_r, rot = recover_centre(
         convention, ra[valid], dec[valid], l_off[valid], m_off[valid], idx, n_tiles
     )
-    ref = np.full(n_tiles, np.nan)
-    present, first = np.unique(idx, return_index=True)
-    ref[present] = ra0_r[first]
-    rel = wrap180(ra0_r - ref[idx])
-    ra0_t = (ref + group_reduce(rel, idx, n_tiles)) % 360.0
-    dec0_t = group_reduce(dec0_r, idx, n_tiles)
+    ra0_t, dec0_t = tile_median_centre(ra0_r, dec0_r, idx, n_tiles)
     dev = 3600.0 * np.hypot(
         wrap180(ra0_r - ra0_t[idx]) * np.cos(np.radians(dec0_t[idx])),
         dec0_r - dec0_t[idx],
     )
-    return CentreFit(convention, ra0_t, dec0_t, dev, float(np.mean(dev > tol_arcsec)))
+    frac_bad = float(np.mean(~(dev <= tol_arcsec))) if len(dev) else float("nan")
+    return CentreFit(convention, ra0_t, dec0_t, dev, frac_bad, rot)
 
 
 def sep_deg(ra: F64, dec: F64, ra0: F64, dec0: F64) -> F64:
@@ -364,6 +579,7 @@ def choose_centres(
     names: NDArray[np.str_],
     idx: IntArr,
     tol_arcsec: float,
+    max_bad_frac: float = 1e-3,
 ) -> tuple[CentreFit, BoolArr]:
     """Fit all conventions, report, and return the best (exits if none fits)."""
     valid = (
@@ -381,12 +597,33 @@ def choose_centres(
         print(
             f"  convention {f.convention:10s}: {100 * f.frac_bad:7.3f}% rows > {tol_arcsec:g} arcsec from tile centre"
         )
-    best = min(fits_, key=lambda f: f.frac_bad)
-    if best.frac_bad > 1e-3:
+    best = min(fits_, key=lambda f: np.nan_to_num(f.frac_bad, nan=np.inf))
+    if not best.frac_bad <= max_bad_frac:
         sys.exit(
-            "no offset convention gives consistent tile centres; supply --boresights"
+            "no offset convention gives consistent tile centres (see --tol-arcsec "
+            "and --max-bad-frac); supply --boresights"
         )
     print(f"using convention: {best.convention}")
+    n_rows = np.bincount(idx[valid], minlength=len(names))
+    has_rows = n_rows > 0
+    no_centre = has_rows & ~(np.isfinite(best.ra0) & np.isfinite(best.dec0))
+    if no_centre.any():
+        sys.exit(
+            f"no finite centre for {int(no_centre.sum())} tiles with rows, "
+            f"e.g. {list(names[no_centre][:5])}; supply --boresights"
+        )
+    if best.rot is not None:
+        rot = wrap180(best.rot[has_rows])
+        print(
+            f"  arc frame rotation per tile: median {np.median(rot):.3f} deg, "
+            f"range [{rot.min():.3f}, {rot.max():.3f}] (expect 45 deg + POL_AXIS)"
+        )
+        few = has_rows & (n_rows < 5)
+        if few.any():
+            print(
+                f"  warning: rotation fitted from fewer than 5 rows for {int(few.sum())} tiles, "
+                f"e.g. {list(names[few][:5])}; check the audit CSV or supply --boresights"
+            )
     if sep is not None:
         v = valid & np.isfinite(sep)
         mine = sep_deg(ra[v], dec[v], best.ra0[idx[v]], best.dec0[idx[v]])
@@ -404,11 +641,13 @@ def write_audit(
     dec0: F64,
     idx_valid: IntArr,
     dev: F64,
+    rot: F64 | None = None,
 ) -> None:
     """CSV of recovered centres, with tile-name positions for comparison."""
     n = len(names)
     count = np.bincount(idx_valid, minlength=n)
     max_dev = group_reduce(dev, idx_valid, n, "max")
+    rot_t = np.full(n, np.nan) if rot is None else wrap180(rot)
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(
@@ -418,13 +657,16 @@ def write_audit(
                 "dec0",
                 "n_rows",
                 "max_dev_arcsec",
+                "arc_rot_deg",
                 "name_ra",
                 "name_dec",
             ]
         )
         for i, nm in enumerate(names):
             p = parse_tile_name(nm) or (float("nan"), float("nan"))
-            w.writerow([nm, ra0[i], dec0[i], int(count[i]), max_dev[i], p[0], p[1]])
+            w.writerow(
+                [nm, ra0[i], dec0[i], int(count[i]), max_dev[i], rot_t[i], p[0], p[1]]
+            )
 
 
 def centres_from_file(path: str, names: NDArray[np.str_]) -> tuple[F64, F64]:
@@ -504,9 +746,13 @@ def squared_unit(a: str | None, b: str | None) -> str | None:
     if not a or not b:
         return None
     try:
-        return (au.Unit(a) * au.Unit(b)).to_string()
+        unit = au.Unit(a) * au.Unit(b)
     except ValueError:
         return None
+    try:
+        return unit.to_string("fits")
+    except ValueError:  # e.g. "beam" has no FITS spelling
+        return unit.to_string()
 
 
 SER_BEGIN: Final[str] = "--BEGIN-ASTROPY-SERIALIZED-COLUMNS--"
@@ -533,10 +779,28 @@ def serialized_lines(
     if "datatype:" not in lines:
         return []
     start = lines.index("datatype:") + 1
-    stops = [
-        i for i, v in enumerate(lines) if i >= start and v in ("meta: !!omap", SER_END)
-    ]
-    return lines[start : stops[0]] if stops else []
+    return lines[start : datatype_list_end(lines, start)]
+
+
+def datatype_list_end(values: Sequence[str], start: int) -> int:
+    """Index just past the last COMMENT line of the ``datatype:`` list.
+
+    ``values`` are the COMMENT values of the serialised block and ``start``
+    the line after ``datatype:``. A line belongs to the list if it starts a
+    new item (``- ``), is a YAML wrap of the previous item (indented), or is
+    a continuation chunk (astropy splits long lines into 70-character pieces
+    ending in a backslash). What follows the list depends on the astropy
+    version: ``meta: !!omap`` (7.x and later), ``schema: astropy-2.0``
+    (earlier versions, when the table has no meta) or the end sentinel.
+    """
+    i, cont = start, False
+    while i < len(values):
+        v = values[i]
+        if not (cont or v.startswith("- ") or v[:1].isspace()):
+            break
+        cont = len(v) == 71 and v.endswith("\\")
+        i += 1
+    return i
 
 
 def splice_serialized(hdr: fits.Header, lines: Sequence[str]) -> bool:
@@ -544,13 +808,15 @@ def splice_serialized(hdr: fits.Header, lines: Sequence[str]) -> bool:
 
     Returns False (header untouched) if the header has no serialised block.
     """
-    cards = hdr.cards
-    com = [(i, str(c.value)) for i, c in enumerate(cards) if c.keyword == "COMMENT"]
-    try:
-        d = next(i for i, v in com if v == "datatype:")
-        end = next(i for i, v in com if i > d and v in ("meta: !!omap", SER_END))
-    except StopIteration:
+    com = [(i, str(c.value)) for i, c in enumerate(hdr.cards) if c.keyword == "COMMENT"]
+    values = [v for _, v in com]
+    if "datatype:" not in values:
         return False
+    d = values.index("datatype:") + 1
+    e = datatype_list_end(values, d)
+    if e >= len(com):
+        return False  # no card after the list to insert before
+    end = com[e][0]
     for line in reversed(lines):
         hdr.insert(end, ("COMMENT", line))
     return True
@@ -596,10 +862,17 @@ def extend_header(
     splice_serialized(new, serialized_lines(resolved))
     new["NAXIS1"] = int(hdr["NAXIS1"]) + 8 * len(plan)
     new["TFIELDS"] = n0 + len(plan)
+    strip_checksums(new)
     new["POLFRAME"] = ("LOCAL_NORTH_COLS_ADDED", "_corr columns added by fix_polframe")
     new["POLFSRC"] = (source_label, "boresight source")
     new["POLFSIGN"] = (FRAME_SIGN, "chi_true = chi + sign*gamma")
     return new
+
+
+def strip_checksums(hdr: fits.Header) -> None:
+    """Drop CHECKSUM/DATASUM in place; they would not match the output."""
+    for key in ("CHECKSUM", "DATASUM"):
+        hdr.remove(key, ignore_missing=True, remove_all=True)
 
 
 def angle_lower_edge(chi: F64, override: float | None, name: str) -> float:
@@ -646,6 +919,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="max within-tile scatter of the recovered centre",
     )
+    p.add_argument(
+        "--max-bad-frac",
+        type=float,
+        default=1e-3,
+        help="max fraction of rows allowed to exceed --tol-arcsec",
+    )
     p.add_argument("--chunk-rows", type=int, default=100_000)
     p.add_argument("--overwrite", action="store_true")
     return p
@@ -663,6 +942,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(hdul) != 2 or not isinstance(hdul[1], fits.BinTableHDU):
             sys.exit("expected a primary HDU and exactly one binary table")
         hdr0, hdr1 = hdul[0].header, hdul[1].header
+        if int(hdr0.get("NAXIS", 0)) != 0:
+            sys.exit("primary HDU carries data; only a bare primary is supported")
         if int(hdr1.get("PCOUNT", 0)) != 0:
             sys.exit("variable-length columns (PCOUNT != 0) are not supported")
         n, naxis1 = int(hdr1["NAXIS2"]), int(hdr1["NAXIS1"])
@@ -697,6 +978,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         # ---- pass 1: centres, angle ranges, error-column check ------------
         print(f"pass 1: {n} rows")
         tnames, tidx = tile_index(raw[cols.tile])
+        if "field_name" in names_all and cols.tile != "field_name":
+            fnames, fidx = tile_index(raw["field_name"])
+            n_diff = int((tnames[tidx] != fnames[fidx]).sum())
+            if n_diff:
+                print(
+                    f"warning: field_name differs from {cols.tile} for {n_diff} rows; "
+                    "arrakis computes the l/m offsets per field_name, so consider "
+                    "--tile-col field_name or --boresights"
+                )
+            del fnames, fidx
         ra, dec = col(cols.ra), col(cols.dec)
         if args.boresights:
             ra0_t, dec0_t = centres_from_file(args.boresights, tnames)
@@ -712,10 +1003,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tnames,
                 tidx,
                 args.tol_arcsec,
+                args.max_bad_frac,
             )
             ra0_t, dec0_t = best.ra0, best.dec0
             audit = Path(args.centres_out or f"{args.output}.tile_centres.csv")
-            write_audit(audit, tnames, ra0_t, dec0_t, tidx[valid], best.dev_arcsec)
+            write_audit(
+                audit, tnames, ra0_t, dec0_t, tidx[valid], best.dev_arcsec, best.rot
+            )
             print(f"wrote tile-centre audit {audit}")
             source = f"offsets:{best.convention}"
         lo = {a: angle_lower_edge(col(a), args.angle_min, a) for a in cols.angles}
@@ -746,8 +1040,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if has_err:
             read_cols += [cols.q_err, cols.u_err]
         written = 0
+        n_nan_gamma = 0
+        out_hdr0 = hdr0.copy()
+        strip_checksums(out_hdr0)
         with open(args.output, "wb") as out:
-            out.write(hdr0.tostring(padding=True).encode("ascii"))
+            out.write(out_hdr0.tostring(padding=True).encode("ascii"))
             out.write(new_hdr.tostring(padding=True).encode("ascii"))
             for s in range(0, n, args.chunk_rows):
                 e = min(s + args.chunk_rows, n)
@@ -756,6 +1053,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 gamma = gamma_deg(
                     chunk[cols.ra], chunk[cols.dec], ra0_t[ti], dec0_t[ti]
                 )
+                n_nan_gamma += int((~np.isfinite(gamma)).sum())
                 new = np.stack(compute_new(cols, chunk, gamma, lo, has_err), axis=1)
                 buf = np.empty((e - s, naxis1 + extra), dtype=np.uint8)
                 buf[:, :naxis1] = rows[s:e]
@@ -769,6 +1067,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"  {e}/{n}", end="\r")
             out.write(b"\0" * (-written % BLOCK))
     print(f"\nwrote {args.output}: {n} rows, added {[c.name for c in plan]}")
+    if n_nan_gamma:
+        print(
+            f"note: {n_nan_gamma} rows have no finite gamma (non-finite ra/dec or "
+            "an empty tile name); their _corr columns are NaN"
+        )
     return 0
 
 
