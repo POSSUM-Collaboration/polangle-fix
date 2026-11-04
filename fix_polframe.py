@@ -44,7 +44,6 @@ from astropy.table import Column, Table
 FRAME_SIGN = 1.0  # chi_true = chi_measured + FRAME_SIGN * gamma
 SUFFIX = "_corr"
 GAMMA_COL = "pol_frame_gamma"
-COV_COL = "stokesQU_cov_corr"
 
 ANGLES = ("polangle", "derot_polangle")
 QU_PAIRS = (("stokesQ", "stokesU"), ("stokesQ_bkg", "stokesU_bkg"))
@@ -202,17 +201,17 @@ def main(argv=None) -> int:
         add_column(t, un + SUFFIX, u2, src=un)
     qe, ue = ERRS
     if np.isfinite(f64(t, qe)).any() and np.isfinite(f64(t, ue)).any():
-        sq, su, cov = rotate_qu_cov(f64(t, qe), f64(t, ue), gamma)
+        sq, su, _ = rotate_qu_cov(f64(t, qe), f64(t, ue), gamma)
         add_column(t, qe + SUFFIX, sq, src=qe)
         add_column(t, ue + SUFFIX, su, src=ue)
-        units = [t[c].unit for c in ERRS]
-        add_column(
-            t,
-            COV_COL,
-            cov,
-            unit=units[0] * units[1] if all(units) else None,
-            desc="Q-U covariance of the error, local-north frame",
-        )
+        # units = [t[c].unit for c in ERRS]
+        # add_column(
+        #     t,
+        #     COV_COL,
+        #     cov,
+        #     unit=units[0] * units[1] if all(units) else None,
+        #     desc="Q-U covariance of the error, local-north frame",
+        # )
     else:
         print(f"note: {qe}/{ue} have no finite values; error columns skipped")
     add_column(
