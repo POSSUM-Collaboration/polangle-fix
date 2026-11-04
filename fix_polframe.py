@@ -677,7 +677,7 @@ def centres_from_file(path: str, names: NDArray[np.str_]) -> tuple[F64, F64]:
     """Per-tile centres from a CSV with columns tile_id, ra0, dec0 (deg)."""
     with open(path, newline="") as fh:
         look = {
-            r["tile_id"].strip(): (float(r["ra0"]), float(r["dec0"]))
+            r["FIELD_NAME"].strip(): (float(r["RA_DEG"]), float(r["DEC_DEG"]))
             for r in csv.DictReader(fh)
         }
     missing = [n for n in names if n and n not in look]
