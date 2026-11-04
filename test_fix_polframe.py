@@ -92,8 +92,11 @@ def test_wrap_angle():
 CENTRES = {"RACS_0426-84": (66.5, -84.0), "RACS_1200-30": (180.0, -30.0)}
 
 
-def make_catalogue(tmp_path, n_per_tile=300):
-    """Two tiles, one near the pole, as a FITS table plus a boresight CSV."""
+def make_catalogue(tmp_path, n_per_tile=300, with_sep=False):
+    """Two tiles, one near the pole, as a FITS table plus a boresight CSV.
+
+    ``with_sep`` adds a separation_tile_centre column, as arrakis writes it.
+    """
     ras, decs, tiles = [], [], []
     for name, (r0, d0) in CENTRES.items():
         cs = SkyCoord(r0 * u.deg, d0 * u.deg).directional_offset_by(
@@ -123,6 +126,13 @@ def make_catalogue(tmp_path, n_per_tile=300):
     t["flag"] = Column(RNG.uniform(size=n) > 0.5)
     t["name"] = Column([f"src{i}" for i in range(n)])
     t["polangle"][3] = np.nan  # a null
+    if with_sep:
+        r0 = np.array([CENTRES[x][0] for x in tiles])
+        d0 = np.array([CENTRES[x][1] for x in tiles])
+        sep = SkyCoord(ras * u.deg, decs * u.deg).separation(
+            SkyCoord(r0 * u.deg, d0 * u.deg)
+        )
+        t["separation_tile_centre"] = Column(sep.deg, unit="deg")
     path = tmp_path / "cat.fits"
     t.write(path)
     with fits.open(path) as hdul:  # add checksums, as a released file may have
@@ -146,14 +156,23 @@ def expected_gamma(t):
 def test_end_to_end_preserves_everything(tmp_path):
     path, orig, bore = make_catalogue(tmp_path, n_per_tile=250)
     out = tmp_path / "out.fits"
-    assert fp.main([str(path), str(out), "--boresights", str(bore)]) == 0
+    args = [str(path), str(out), "--boresights", str(bore), "--chunk-rows", "77"]
+    assert fp.main(args) == 0  # uneven chunks
 
     with fits.open(path) as a, fits.open(out) as b:
         ha, hb = a[1].header, b[1].header
         # stale checksums are dropped rather than copied
         assert "CHECKSUM" in ha and "CHECKSUM" not in hb and "DATASUM" not in hb
         assert "CHECKSUM" not in b[0].header
-        assert hb["TFIELDS"] == ha["TFIELDS"] + 10
+        assert hb["TFIELDS"] == ha["TFIELDS"] + 9
+        # the original rows are copied byte for byte
+        ra_ = np.frombuffer(np.asarray(a[1].data).tobytes(), np.uint8).reshape(
+            len(orig), -1
+        )
+        rb_ = np.frombuffer(np.asarray(b[1].data).tobytes(), np.uint8).reshape(
+            len(orig), -1
+        )
+        assert (rb_[:, : ra_.shape[1]] == ra_).all()
     res, base = Table.read(out), Table.read(path)
 
     # original columns are unchanged, values and metadata
@@ -165,11 +184,10 @@ def test_end_to_end_preserves_everything(tmp_path):
     new = [
         "polangle_corr", "derot_polangle_corr", "stokesQ_corr", "stokesU_corr",
         "stokesQ_bkg_corr", "stokesU_bkg_corr", "stokesQ_err_corr",
-        "stokesU_err_corr", "stokesQU_cov_corr", "pol_frame_gamma",
+        "stokesU_err_corr", "pol_frame_gamma",
     ]  # fmt: skip
     assert res.colnames == base.colnames + new
     assert res["polangle_corr"].unit == "deg"
-    assert res["stokesQU_cov_corr"].unit == u.Jy**2
     assert "local-north" in res["polangle_corr"].description
 
     g = expected_gamma(orig)
@@ -203,3 +221,115 @@ def test_refuses_primary_with_data(tmp_path):
 def test_refuses_gzip(tmp_path):
     with pytest.raises(SystemExit):
         fp.main([str(tmp_path / "x.fits.gz"), str(tmp_path / "o.fits")])
+
+
+def test_layout_change_stops_without_writing(tmp_path, monkeypatch):
+    path, _, bore = make_catalogue(tmp_path, n_per_tile=20)
+    out = tmp_path / "out.fits"
+    monkeypatch.setattr(fp, "match_layout", lambda *_: "TFORM3 differs")
+    with pytest.raises(SystemExit, match="TFORM3 differs"):
+        fp.main([str(path), str(out), "--boresights", str(bore)])
+    assert not out.exists()
+
+
+def test_match_layout_keeps_input_null_markers():
+    old, new = fits.Header(), fits.Header()
+    for h in (old, new):
+        h["NAXIS1"] = 8
+        h["TFIELDS"] = 2
+        h["TTYPE1"], h["TFORM1"] = "n_comp", "J"
+        h["TTYPE2"], h["TFORM2"] = "count", "J"
+    old["TNULL1"] = -1  # astropy < 6.0 writes its default instead
+    new["TNULL1"] = 999999
+    new["TNULL2"] = 999999  # and may add one the input did not have
+    new["NAXIS1"] = 16
+    new["TFIELDS"] = 3
+    new["TTYPE3"], new["TFORM3"] = "pol_frame_gamma", "D"
+    assert fp.match_layout(old, new, 2, 1) is None
+    assert new["TNULL1"] == -1 and "TNULL2" not in new
+    new["TFORM2"] = "K"
+    assert "TFORM2" in fp.match_layout(old, new, 2, 1)
+
+
+def test_awkward_columns_copied_verbatim(tmp_path):
+    """Integer nulls, scaled unsigned ints, booleans, empty strings, extra cards."""
+    n = 6
+    cols = [
+        fits.Column("ra", "D", unit="deg", array=np.linspace(180, 181, n)),
+        fits.Column("dec", "D", unit="deg", array=np.full(n, -30.0)),
+        fits.Column(
+            "tile_id", "14A", array=np.array([b"RACS_1200-30  "] * (n - 1) + [b""])
+        ),
+        fits.Column(
+            "comment", "8A", array=np.array([b"", b"ok", b"", b"x", b"", b"y"])
+        ),
+        fits.Column(
+            "n_comp", "J", null=-1, array=np.array([1, 2, -1, 4, -1, 6], dtype=">i4")
+        ),
+        fits.Column(
+            "count16",
+            "I",
+            bzero=32768,
+            array=np.array([0, 1, 2, 60000, 5, 6], dtype=np.uint16),
+        ),
+        fits.Column("flag", "L", array=np.array([True, False] * 3)),
+        fits.Column(
+            "snr",
+            "E",
+            disp="F8.2",
+            array=np.array([1.5, np.nan, 3, 4, 5, 6], dtype=">f4"),
+        ),
+    ]
+    for nm in fp.ANGLES:
+        cols.append(fits.Column(nm, "D", unit="deg", array=np.linspace(10, 170, n)))
+    for nm in [c for pr in fp.QU_PAIRS for c in pr] + list(fp.ERRS):
+        cols.append(fits.Column(nm, "D", unit="Jy/beam", array=np.linspace(0.1, 1, n)))
+    hdu = fits.BinTableHDU.from_columns(cols)
+    hdu.header["TCOMM1"] = "Right ascension"
+    hdu.header["TUCD1"] = "pos.eq.ra;meta.main"
+    hdu.header["SURVEY"] = ("SPICE-RACS", "survey name")
+    path, out = tmp_path / "in.fits", tmp_path / "out.fits"
+    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path)
+    bore = tmp_path / "bore.csv"
+    pd.DataFrame(
+        {"FIELD_NAME": ["RACS_1200-30"], "RA_DEG": [180.0], "DEC_DEG": [-30.0]}
+    ).to_csv(bore, index=False)
+
+    assert fp.main([str(path), str(out), "--boresights", str(bore)]) == 0
+    with fits.open(path) as a, fits.open(out) as b:
+        for k in ("TCOMM1", "TUCD1", "SURVEY", "TNULL5", "TZERO6", "TDISP8"):
+            assert b[1].header[k] == a[1].header[k], k
+        for name in a[1].columns.names:
+            x, y = np.asarray(a[1].data.field(name)), np.asarray(b[1].data.field(name))
+            assert x.dtype == y.dtype and x.tobytes() == y.tobytes(), name
+        gamma = np.asarray(b[1].data.field("pol_frame_gamma"))
+        assert np.isfinite(gamma[:-1]).all() and np.isnan(gamma[-1])  # empty tile_id
+
+
+def test_separation_check(tmp_path):
+    path, _, bore = make_catalogue(tmp_path, n_per_tile=40, with_sep=True)
+    out = tmp_path / "out.fits"
+    assert fp.main([str(path), str(out), "--boresights", str(bore)]) == 0
+    # a boresight 10 arcsec off, as a CSV from another epoch might give
+    df = pd.read_csv(bore)
+    df.loc[df.FIELD_NAME == "RACS_1200-30", "DEC_DEG"] += 10 / 3600
+    df.to_csv(bore, index=False)
+    with pytest.raises(SystemExit, match="different RACS epoch"):
+        fp.main([str(path), str(out), "--boresights", str(bore), "--overwrite"])
+    args = [str(path), str(out), "--boresights", str(bore), "--overwrite"]
+    assert fp.main(args + ["--sep-tol-arcsec", "inf"]) == 0  # check can be skipped
+
+
+def test_refuses_to_overwrite_input(tmp_path):
+    path, _, bore = make_catalogue(tmp_path, n_per_tile=20)
+    before = path.read_bytes()
+    with pytest.raises(SystemExit, match="input"):
+        fp.main([str(path), str(path), "--boresights", str(bore), "--overwrite"])
+    assert path.read_bytes() == before
+
+
+def test_tile_names_decodes_each_distinct_value_once():
+    col = np.array([b"RACS_A  ", b"RACS_B", b"RACS_A  ", b"", b"RACS_B"])
+    names, idx = fp.tile_names(col)
+    assert list(names[idx]) == ["RACS_A", "RACS_B", "RACS_A", "", "RACS_B"]
+    assert len(names) == 3
