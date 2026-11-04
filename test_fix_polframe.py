@@ -104,7 +104,9 @@ def test_spherical_helpers_match_astropy():
     ra, dec, ra0, dec0 = random_field(2000)
     c0, c = SkyCoord(ra0 * u.deg, dec0 * u.deg), SkyCoord(ra * u.deg, dec * u.deg)
     pa = c0.position_angle(c).deg
-    assert np.abs(fp.wrap180(fp.position_angle_deg(ra0, dec0, ra, dec) - pa)).max() < 1e-9
+    assert (
+        np.abs(fp.wrap180(fp.position_angle_deg(ra0, dec0, ra, dec) - pa)).max() < 1e-9
+    )
     sep = c0.separation(c).deg
     r, d = fp.offset_by_deg(ra0, dec0, pa, sep)
     assert fp.sep_deg(r, d, ra, dec).max() < 1e-9
@@ -225,7 +227,9 @@ def test_skyoffset_has_two_roots_near_the_pole():
 def test_splice_serialized_inserts_at_end_of_datatype_list(tail):
     import yaml
 
-    full = "- {name: dec, unit: deg, datatype: float64, description: 'Declination [ICRS]'}"
+    full = (
+        "- {name: dec, unit: deg, datatype: float64, description: 'Declination [ICRS]'}"
+    )
     chunk = full[:70] + "\\"  # a 70-character piece plus the continuation mark
     assert len(chunk) == 71
     items = ["- {name: ra, unit: deg, datatype: float64}", chunk, full[70:]]
@@ -405,7 +409,7 @@ def test_end_to_end_arc_offsets_with_rotation(tmp_path):
 def test_refuses_primary_with_data(tmp_path):
     from astropy.io import fits
 
-    path, t, _ = make_catalogue(tmp_path, n_per_tile=20)
+    path, _t, _ = make_catalogue(tmp_path, n_per_tile=20)
     with fits.open(path) as hdul:
         hdul[0].data = np.zeros(4)
         hdul.writeto(path, overwrite=True)

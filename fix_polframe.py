@@ -225,10 +225,14 @@ def offset_by_deg(ra: F64, dec: F64, pa: F64, sep: F64) -> tuple[F64, F64]:
     da = np.arctan2(xsin, xcos)
     at_pole = np.cos(d) < 1e-12  # ra is arbitrary there; copy astropy's choice
     da = np.where(at_pole, np.where(d > 0, np.pi - p, p), da)
-    return (ra + np.degrees(da)) % 360.0, np.degrees(np.arcsin(np.clip(cos_b, -1.0, 1.0)))
+    return (ra + np.degrees(da)) % 360.0, np.degrees(
+        np.arcsin(np.clip(cos_b, -1.0, 1.0))
+    )
 
 
-def offsets_arc(ra: F64, dec: F64, ra0: F64, dec0: F64, rot: F64 | float = 0.0) -> tuple[F64, F64]:
+def offsets_arc(
+    ra: F64, dec: F64, ra0: F64, dec0: F64, rot: F64 | float = 0.0
+) -> tuple[F64, F64]:
     """ARC offsets of (ra, dec) from (ra0, dec0) in a frame rotated by ``rot``.
 
     l = sep sin(PA - rot), m = sep cos(PA - rot), all in degrees, where sep
@@ -293,9 +297,7 @@ def _tile_mean_dir(ra0: F64, dec0: F64, idx: IntArr, n: int) -> tuple[F64, F64]:
     return np.degrees(np.arctan2(y, x)) % 360.0, dec
 
 
-def tile_median_centre(
-    ra0_r: F64, dec0_r: F64, idx: IntArr, n: int
-) -> tuple[F64, F64]:
+def tile_median_centre(ra0_r: F64, dec0_r: F64, idx: IntArr, n: int) -> tuple[F64, F64]:
     """Per-group median of per-row centres (deg), robust to RA wrap and NaNs.
 
     RA is taken relative to the first finite row of the group so that a group
@@ -364,7 +366,9 @@ def fit_arc_frame(
                 dy = (sxx * by - sxy * bx) / det  # north component
             step = np.hypot(dx, dy)
             ok = np.isfinite(step) & (step > 0)
-            n_ra, n_dec = offset_by_deg(c_ra, c_dec, np.degrees(np.arctan2(dx, dy)), step)
+            n_ra, n_dec = offset_by_deg(
+                c_ra, c_dec, np.degrees(np.arctan2(dx, dy)), step
+            )
             c_ra, c_dec = np.where(ok, n_ra, c_ra), np.where(ok, n_dec, c_dec)
             if not ok.any() or step[ok].max() < 1e-13:
                 break
