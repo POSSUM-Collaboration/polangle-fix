@@ -221,3 +221,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# hatch-vcs
+spice_racs_fix/_version.py
