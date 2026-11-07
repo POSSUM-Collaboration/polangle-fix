@@ -1,0 +1,114 @@
+# Hooks for prek (https://prek.j178.dev).
+# Run with: uv run prek run --hook-stage manual --all-files
+#:schema https://www.schemastore.org/prek.json
+
+# prek's built in hooks, no hook environments to install
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "check-added-large-files" },
+  { id = "check-case-conflict" },
+  { id = "check-merge-conflict" },
+  { id = "check-symlinks" },
+  { id = "check-toml" },
+  { id = "check-yaml" },
+  { id = "end-of-file-fixer" },
+  { id = "mixed-line-ending" },
+  { id = "requirements-txt-fixer" },
+  { id = "trailing-whitespace" },
+]
+
+# Hooks prek has no built in version of
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v5.0.0"
+hooks = [
+  { id = "debug-statements" },
+  { id = "name-tests-test", args = ["--pytest-test-first"], exclude = '^tests/scripts/.*\.py$' },
+]
+
+[[repos]]
+repo = "https://github.com/astral-sh/uv-pre-commit"
+rev = "0.13.7"
+hooks = [
+  { id = "uv-lock" },
+]
+
+[[repos]]
+repo = "https://github.com/adamchainz/blacken-docs"
+rev = "1.19.1"
+hooks = [
+  { id = "blacken-docs", additional_dependencies = ["black==24.*"] },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pygrep-hooks"
+rev = "v1.10.0"
+hooks = [
+  { id = "rst-backticks" },
+  { id = "rst-directive-colons" },
+  { id = "rst-inline-touching-normal" },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/mirrors-prettier"
+rev = "v4.0.0-alpha.8"
+hooks = [
+  {
+    id = "prettier",
+    types_or = ["yaml", "markdown", "html", "css", "scss", "javascript", "json"],
+    args = ["--prose-wrap=always"],
+  },
+]
+
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "v0.12.5"
+hooks = [
+  { id = "ruff", args = ["--fix", "--show-fixes"] },
+  { id = "ruff-format" },
+]
+
+[[repos]]
+repo = "https://github.com/codespell-project/codespell"
+rev = "v2.4.1"
+hooks = [
+  { id = "codespell" },
+]
+
+[[repos]]
+repo = "https://github.com/abravalheri/validate-pyproject"
+rev = "v0.24.1"
+hooks = [
+  { id = "validate-pyproject", additional_dependencies = ["validate-pyproject-schema-store[all]"] },
+]
+
+[[repos]]
+repo = "https://github.com/python-jsonschema/check-jsonschema"
+rev = "0.33.2"
+hooks = [
+  { id = "check-dependabot" },
+  { id = "check-github-workflows" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "disallow-caps",
+    name = "Disallow improper capitalization",
+    language = "pygrep",
+    entry = "PyBind|Numpy|Cmake|CCache|Github|PyTest",
+    exclude = "^prek\\.toml$",
+  },
+  # mypy runs in the locked project environment, so it sees the real numpy and
+  # astropy instead of a separate pinned copy
+  {
+    id = "mypy",
+    name = "mypy",
+    language = "system",
+    entry = "uv run --locked mypy",
+    types = ["python"],
+    pass_filenames = false,
+  },
+]
