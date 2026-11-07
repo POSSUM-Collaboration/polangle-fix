@@ -5,8 +5,6 @@ from pathlib import Path
 
 import nox
 
-DIR = Path(__file__).parent.resolve()
-
 nox.needs_version = ">=2024.3.2"
 nox.options.sessions = ["lint", "tests"]
 nox.options.default_venv_backend = "uv|virtualenv"
@@ -45,7 +43,7 @@ def build(session: nox.Session) -> None:
     Build an SDist and wheel.
     """
 
-    build_path = DIR.joinpath("build")
+    build_path = Path(__file__).parent.resolve() / "build"
     if build_path.exists():
         shutil.rmtree(build_path)
 

@@ -57,32 +57,28 @@ from spice_racs_fix.geometry import (
 )
 from spice_racs_fix.logging import logger
 
-FRAME_SIGN = 1.0
-"""chi_true = chi_measured + FRAME_SIGN * gamma"""
-SUFFIX = "_corr"
-"""Suffix of corrected columns"""
-GAMMA_COL = "pol_frame_gamma"
-"""Name of the gamma column"""
-SEP_COL = "separation_tile_centre"
-"""Catalogue column used to cross-check boresights"""
-ANGLES = ("polangle", "derot_polangle")
-"""Angle columns to rotate"""
-QU_PAIRS = (("stokesQ", "stokesU"), ("stokesQ_bkg", "stokesU_bkg"))
-"""Q/U column pairs to rotate"""
-ERRS = ("stokesQ_err", "stokesU_err")
-"""Q/U error columns to propagate"""
-DEFAULT_BORESIGHTS = Path(__file__).parent / "data" / "field_data.csv"
-"""RACS-low3 field centres shipped with the package"""
-
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PolframeOptions:
     """Options for the polarisation frame correction"""
 
-    boresights: Path = DEFAULT_BORESIGHTS
-    """CSV with FIELD_NAME, RA_DEG, DEC_DEG"""
+    boresights: Path = Path(__file__).parent / "data" / "field_data.csv"
+    """CSV with FIELD_NAME, RA_DEG, DEC_DEG; defaults to the RACS-low3 fields"""
     tile_col: str = "tile_id"
     """Column naming each row's tile"""
+    sep_col: str = "separation_tile_centre"
+    """Column used to cross-check boresights"""
+    angle_cols: tuple[str, ...] = ("polangle", "derot_polangle")
+    """Angle columns to rotate"""
+    qu_cols: tuple[tuple[str, str], ...] = (
+        ("stokesQ", "stokesU"),
+        ("stokesQ_bkg", "stokesU_bkg"),
+    )
+    """Q/U column pairs to rotate"""
+    qu_err_cols: tuple[str, str] = ("stokesQ_err", "stokesU_err")
+    """Q/U error columns to propagate"""
+    gamma_col: str = "pol_frame_gamma"
+    """Name of the new gamma column"""
     angle_min: float | None = None
     """Lower edge of the angle range, 0 or -90; None infers it from the data"""
     sep_tol_arcsec: float = 1.0
@@ -187,46 +183,47 @@ def check_separations(
     ra: NDArray[np.float64],
     dec: NDArray[np.float64],
     bore: TileBoresights,
-    tol_arcsec: float,
+    options: PolframeOptions,
 ) -> float | None:
-    """Compare each row's separation from its boresight with SEP_COL.
+    """Compare each row's separation from its boresight with the catalogue's.
 
     Args:
         table: The catalogue table.
         ra: Source right ascension (deg).
         dec: Source declination (deg).
         bore: Per-row boresights.
-        tol_arcsec: Largest allowed difference.
+        options: Polframe options (separation column and tolerance).
 
     Returns:
         Worst difference (arcsec), or None if the catalogue cannot be checked.
 
     Raises:
         CatalogueError: If any row differs by more than the tolerance, or
-            SEP_COL has a non-angular unit.
+            the separation column has a non-angular unit.
     """
-    if SEP_COL not in table.colnames:
-        logger.info("no %s column; boresights not cross-checked", SEP_COL)
+    sep_col, tol_arcsec = options.sep_col, options.sep_tol_arcsec
+    if sep_col not in table.colnames:
+        logger.info("no %s column; boresights not cross-checked", sep_col)
         return None
-    sep_cat = column_f64(table, SEP_COL)
-    unit = table[SEP_COL].unit
+    sep_cat = column_f64(table, sep_col)
+    unit = table[sep_col].unit
     if unit is not None:
         try:
             sep_cat = sep_cat * unit.to(u.deg)
         except u.UnitConversionError as err:
-            msg = f"{SEP_COL} has non-angular unit {unit}"
+            msg = f"{sep_col} has non-angular unit {unit}"
             raise CatalogueError(msg) from err
     diff = 3600.0 * np.abs(sep_deg(ra, dec, bore.ra0, bore.dec0) - sep_cat)
     ok = np.isfinite(diff)
     if not ok.any():
-        logger.info("no finite %s values; boresights not cross-checked", SEP_COL)
+        logger.info("no finite %s values; boresights not cross-checked", sep_col)
         return None
     worst = float(np.max(diff[ok]))
-    logger.info("boresight check vs %s: max |diff| %.3g arcsec", SEP_COL, worst)
+    logger.info("boresight check vs %s: max |diff| %.3g arcsec", sep_col, worst)
     n_bad = int((diff[ok] > tol_arcsec).sum())
     if n_bad:
         msg = (
-            f"{n_bad} rows are more than {tol_arcsec:g} arcsec from their {SEP_COL} "
+            f"{n_bad} rows are more than {tol_arcsec:g} arcsec from their {sep_col} "
             f"(worst {worst:.1f} arcsec). The boresight CSV probably comes from a "
             "different RACS epoch, or the tile column does not name the field each "
             "row was measured in. Set sep_tol_arcsec to inf to skip this check."
@@ -273,7 +270,7 @@ def _corrected(table: Table, src: str, values: NDArray[np.float64]) -> NewColumn
     """A _corr column borrowing unit and description from its source column."""
     unit = table[src].unit
     return NewColumn(
-        name=src + SUFFIX,
+        name=f"{src}_corr",
         values=values,
         unit=None if unit is None else unit.to_string(),
         description=f"{table[src].description or src} (local-north frame)",
@@ -300,27 +297,29 @@ def polframe_columns(table: Table, options: PolframeOptions) -> PolframeColumns:
             "ra",
             "dec",
             options.tile_col,
-            *ANGLES,
-            *(c for pr in QU_PAIRS for c in pr),
-            *ERRS,
+            *options.angle_cols,
+            *(c for pr in options.qu_cols for c in pr),
+            *options.qu_err_cols,
         ],
     )
     bore = boresights_for_rows(table, options)
     ra, dec = column_f64(table, "ra"), column_f64(table, "dec")
-    max_diff = check_separations(table, ra, dec, bore, options.sep_tol_arcsec)
-    gamma = FRAME_SIGN * gamma_deg(ra, dec, bore.ra0, bore.dec0)
+    max_diff = check_separations(table, ra, dec, bore, options)
+    # chi_true = chi_measured + sign * gamma; tile pairs give +1
+    sign = 1.0
+    gamma = sign * gamma_deg(ra, dec, bore.ra0, bore.dec0)
 
     columns: list[NewColumn] = []
-    for name in ANGLES:
+    for name in options.angle_cols:
         chi = column_f64(table, name)
         lo = angle_lower_edge(chi, options.angle_min, name)
         columns.append(_corrected(table, name, wrap_angle(chi + gamma, lo)))
-    for q_name, u_name in QU_PAIRS:
+    for q_name, u_name in options.qu_cols:
         q_rot, u_rot = rotate_qu(
             column_f64(table, q_name), column_f64(table, u_name), gamma
         )
         columns += [_corrected(table, q_name, q_rot), _corrected(table, u_name, u_rot)]
-    q_err_name, u_err_name = ERRS
+    q_err_name, u_err_name = options.qu_err_cols
     q_err, u_err = column_f64(table, q_err_name), column_f64(table, u_err_name)
     if np.isfinite(q_err).any() and np.isfinite(u_err).any():
         rotated = rotate_qu_errors(q_err, u_err, gamma)
@@ -334,7 +333,7 @@ def polframe_columns(table: Table, options: PolframeOptions) -> PolframeColumns:
         )
     columns.append(
         NewColumn(
-            name=GAMMA_COL,
+            name=options.gamma_col,
             values=gamma,
             unit="deg",
             description="Rotation applied to reach local north (chi_true = chi + gamma)",
@@ -347,7 +346,7 @@ def polframe_columns(table: Table, options: PolframeOptions) -> PolframeColumns:
             "_corr columns added by spice-racs-fix",
         ),
         HeaderCard("POLFSRC", f"file:{options.boresights.name}", "boresight source"),
-        HeaderCard("POLFSIGN", FRAME_SIGN, "chi_true = chi + sign*gamma"),
+        HeaderCard("POLFSIGN", sign, "chi_true = chi + sign*gamma"),
     )
     return PolframeColumns(
         step=StepResult(columns=tuple(columns), cards=cards),
@@ -381,8 +380,8 @@ def run_polframe(
     write_options = write_options or WriteOptions()
     check_output(catalogue, output, write_options.overwrite)
     cat = open_catalogue(catalogue)
-    if GAMMA_COL in cat.table.colnames:
-        msg = f"already has {GAMMA_COL}; refusing to run twice"
+    if options.gamma_col in cat.table.colnames:
+        msg = f"already has {options.gamma_col}; refusing to run twice"
         raise CatalogueError(msg)
     result = polframe_columns(cat.table, options)
     n_rows = append_columns(cat, output, [result.step], write_options)

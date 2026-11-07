@@ -10,12 +10,7 @@ from typing import Any
 
 from spice_racs_fix.fits_io import CatalogueError, WriteOptions
 from spice_racs_fix.logging import logger
-from spice_racs_fix.polframe import (
-    DEFAULT_BORESIGHTS,
-    SEP_COL,
-    PolframeOptions,
-    run_polframe,
-)
+from spice_racs_fix.polframe import PolframeOptions, run_polframe
 
 
 def _default(options_cls: Any, name: str) -> Any:
@@ -52,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     pol.add_argument(
         "--boresights",
         type=Path,
-        default=DEFAULT_BORESIGHTS,
+        default=_default(PolframeOptions, "boresights"),
         help="CSV with FIELD_NAME, RA_DEG, DEC_DEG (default: the RACS-low3 fields)",
     )
     pol.add_argument("--tile-col", default=_default(PolframeOptions, "tile_col"))
@@ -63,7 +58,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--sep-tol-arcsec",
         type=float,
         default=_default(PolframeOptions, "sep_tol_arcsec"),
-        help=f"Largest allowed difference from {SEP_COL} (default: %(default)s; inf skips)",
+        help=(
+            f"Largest allowed difference from {_default(PolframeOptions, 'sep_col')} "
+            "(default: %(default)s; inf skips)"
+        ),
     )
     return parser
 

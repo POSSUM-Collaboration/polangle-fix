@@ -24,10 +24,6 @@ from numpy.typing import NDArray
 
 from spice_racs_fix.logging import logger
 
-BLOCK = 2880
-"""FITS block size (bytes)"""
-LAYOUT_KEYS = ("TTYPE", "TFORM", "TDIM", "TSCAL", "TZERO")
-"""Keywords that fix how a column sits in the row bytes; TNULL is handled apart"""
 CHECKSUM_KEYS = ("CHECKSUM", "DATASUM")
 """Keywords that go stale when the data change"""
 
@@ -247,8 +243,10 @@ def match_layout(
     Returns:
         A description of the first problem, or None.
     """
+    # Keywords that fix how a column sits in the row bytes; TNULL is handled apart
+    layout_keys = ("TTYPE", "TFORM", "TDIM", "TSCAL", "TZERO")
     for i in range(1, n_orig + 1):
-        for k in LAYOUT_KEYS:
+        for k in layout_keys:
             key = f"{k}{i}"
             if old.get(key) != new.get(key):
                 return f"{key} is {old.get(key)!r} in the input, {new.get(key)!r} from astropy"
@@ -323,7 +321,8 @@ def write_streaming(
             block[:, naxis1:] = new_be[start:end].view(np.uint8)
             f.write(block.tobytes())
             written += block.size
-        f.write(b"\0" * (-written % BLOCK))
+        # Pad the data to a whole number of 2880 byte FITS blocks
+        f.write(b"\0" * (-written % 2880))
     del rows
 
 

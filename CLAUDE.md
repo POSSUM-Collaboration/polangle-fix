@@ -52,6 +52,9 @@ uv run prek run --hook-stage manual --all-files
   `spice_racs_fix.*`.
 - Ruff ruleset is wide (see `pyproject.toml`); don't add per-file ignores
   without asking.
+- No module level constants unless several functions or modules genuinely share
+  them. Column names and tunable values go in the step's Options; a value used
+  in one place is a local (or inline) with a short comment.
 - Prefer plain Options/Results containers (NamedTuple/dataclass) over full OOP
   with methods and inheritance. Functions take an Options object, return a
   Results object.

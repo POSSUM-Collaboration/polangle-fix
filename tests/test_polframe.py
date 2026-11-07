@@ -20,12 +20,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-NEW = [
-    "polangle_corr", "derot_polangle_corr", "stokesQ_corr", "stokesU_corr",
-    "stokesQ_bkg_corr", "stokesU_bkg_corr", "stokesQ_err_corr",
-    "stokesU_err_corr", "pol_frame_gamma",
-]  # fmt: skip
-
 
 def wrap180(x: NDArray[np.float64]) -> NDArray[np.float64]:
     return (x + 180.0) % 360.0 - 180.0
@@ -74,7 +68,12 @@ def test_end_to_end_preserves_everything(
         assert np.array_equal(a_, b_, equal_nan=a_.dtype.kind == "f"), c
         assert got[c].unit == base[c].unit
         assert got[c].description == base[c].description
-    assert got.colnames == base.colnames + NEW
+    new = [
+        "polangle_corr", "derot_polangle_corr", "stokesQ_corr", "stokesU_corr",
+        "stokesQ_bkg_corr", "stokesU_bkg_corr", "stokesQ_err_corr",
+        "stokesU_err_corr", "pol_frame_gamma",
+    ]  # fmt: skip
+    assert got.colnames == base.colnames + new
     assert got["polangle_corr"].unit == "deg"
     assert "local-north" in got["polangle_corr"].description
 
@@ -153,9 +152,10 @@ def test_awkward_columns_copied_verbatim(tmp_path: Path) -> None:
             array=np.array([1.5, np.nan, 3, 4, 5, 6], dtype=">f4"),
         ),
     ]
-    for nm in pf.ANGLES:
+    opts = pf.PolframeOptions()
+    for nm in opts.angle_cols:
         cols.append(fits.Column(nm, "D", unit="deg", array=np.linspace(10, 170, n)))
-    for nm in [c for pr in pf.QU_PAIRS for c in pr] + list(pf.ERRS):
+    for nm in [c for pr in opts.qu_cols for c in pr] + list(opts.qu_err_cols):
         cols.append(fits.Column(nm, "D", unit="Jy/beam", array=np.linspace(0.1, 1, n)))
     hdu = fits.BinTableHDU.from_columns(cols)
     hdu.header["TCOMM1"] = "Right ascension"
@@ -226,6 +226,6 @@ def test_tile_names_decodes_each_distinct_value_once() -> None:
 
 
 def test_default_boresights_cover_racs_names() -> None:
-    centres = pf.read_boresights(pf.DEFAULT_BORESIGHTS)
+    centres = pf.read_boresights(pf.PolframeOptions().boresights)
     assert len(centres) > 1000
     assert all(name.startswith("RACS_") for name in centres)
