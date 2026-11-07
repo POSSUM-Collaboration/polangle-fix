@@ -59,7 +59,7 @@ from spice_racs_fix.logging import logger
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class PolframeOptions:
+class RotateToLocalNorthOptions:
     """Options for the polarisation frame correction"""
 
     boresights: Path = Path(__file__).parent / "data" / "field_data.csv"
@@ -94,7 +94,7 @@ class TileBoresights(NamedTuple):
     """Boresight declination per row (deg), NaN for an empty tile name"""
 
 
-class PolframeColumns(NamedTuple):
+class RotateToLocalNorthColumns(NamedTuple):
     """New columns and diagnostics from the frame correction"""
 
     step: StepResult
@@ -105,7 +105,7 @@ class PolframeColumns(NamedTuple):
     """Worst boresight cross-check difference, or None if not checked"""
 
 
-class PolframeResult(NamedTuple):
+class RotateToLocalNorthResult(NamedTuple):
     """Outcome of the polarisation frame correction"""
 
     n_rows: int
@@ -153,12 +153,14 @@ def read_boresights(path: Path) -> dict[str, tuple[float, float]]:
     return centres
 
 
-def boresights_for_rows(table: Table, options: PolframeOptions) -> TileBoresights:
+def boresights_for_rows(
+    table: Table, options: RotateToLocalNorthOptions
+) -> TileBoresights:
     """Look up each row's boresight from its tile name.
 
     Args:
         table: The catalogue table.
-        options: Polframe options.
+        options: Rotation options.
 
     Returns:
         Per-row boresights.
@@ -183,7 +185,7 @@ def check_separations(
     ra: NDArray[np.float64],
     dec: NDArray[np.float64],
     bore: TileBoresights,
-    options: PolframeOptions,
+    options: RotateToLocalNorthOptions,
 ) -> float | None:
     """Compare each row's separation from its boresight with the catalogue's.
 
@@ -192,7 +194,7 @@ def check_separations(
         ra: Source right ascension (deg).
         dec: Source declination (deg).
         bore: Per-row boresights.
-        options: Polframe options (separation column and tolerance).
+        options: Rotation options (separation column and tolerance).
 
     Returns:
         Worst difference (arcsec), or None if the catalogue cannot be checked.
@@ -277,12 +279,14 @@ def _corrected(table: Table, src: str, values: NDArray[np.float64]) -> NewColumn
     )
 
 
-def polframe_columns(table: Table, options: PolframeOptions) -> PolframeColumns:
+def rotate_to_local_north_columns(
+    table: Table, options: RotateToLocalNorthOptions
+) -> RotateToLocalNorthColumns:
     """Compute the local-north columns for every row.
 
     Args:
         table: The catalogue table.
-        options: Polframe options.
+        options: Rotation options.
 
     Returns:
         The new columns, provenance keywords and diagnostics.
@@ -348,25 +352,25 @@ def polframe_columns(table: Table, options: PolframeOptions) -> PolframeColumns:
         HeaderCard("POLFSRC", f"file:{options.boresights.name}", "boresight source"),
         HeaderCard("POLFSIGN", sign, "chi_true = chi + sign*gamma"),
     )
-    return PolframeColumns(
+    return RotateToLocalNorthColumns(
         step=StepResult(columns=tuple(columns), cards=cards),
         gamma=gamma,
         max_sep_diff_arcsec=max_diff,
     )
 
 
-def run_polframe(
+def run_rotate_to_local_north(
     catalogue: Path,
     output: Path,
-    options: PolframeOptions | None = None,
+    options: RotateToLocalNorthOptions | None = None,
     write_options: WriteOptions | None = None,
-) -> PolframeResult:
+) -> RotateToLocalNorthResult:
     """Write a copy of the catalogue with local-north columns appended.
 
     Args:
         catalogue: Uncompressed input FITS file.
         output: Output FITS file.
-        options: Polframe options.
+        options: Rotation options.
         write_options: Write options.
 
     Returns:
@@ -376,21 +380,21 @@ def run_polframe(
         CatalogueError: If anything about the input or output is unsafe.
             Nothing is written in that case.
     """
-    options = options or PolframeOptions()
+    options = options or RotateToLocalNorthOptions()
     write_options = write_options or WriteOptions()
     check_output(catalogue, output, write_options.overwrite)
     cat = open_catalogue(catalogue)
     if options.gamma_col in cat.table.colnames:
         msg = f"already has {options.gamma_col}; refusing to run twice"
         raise CatalogueError(msg)
-    result = polframe_columns(cat.table, options)
+    result = rotate_to_local_north_columns(cat.table, options)
     n_rows = append_columns(cat, output, [result.step], write_options)
     n_no_gamma = int((~np.isfinite(result.gamma)).sum())
     if n_no_gamma:
         logger.info(
             "%d rows have no finite gamma; their _corr columns are NaN", n_no_gamma
         )
-    return PolframeResult(
+    return RotateToLocalNorthResult(
         n_rows=n_rows,
         n_no_gamma=n_no_gamma,
         max_sep_diff_arcsec=result.max_sep_diff_arcsec,

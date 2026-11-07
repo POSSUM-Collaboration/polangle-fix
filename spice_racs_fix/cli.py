@@ -10,7 +10,10 @@ from typing import Any
 
 from spice_racs_fix.fits_io import CatalogueError, WriteOptions
 from spice_racs_fix.logging import logger
-from spice_racs_fix.polframe import PolframeOptions, run_polframe
+from spice_racs_fix.rotate_to_local_north import (
+    RotateToLocalNorthOptions,
+    run_rotate_to_local_north,
+)
 
 
 def _default(options_cls: Any, name: str) -> Any:
@@ -40,26 +43,28 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     pol = sub.add_parser(
-        "polframe",
+        "rotate-to-local-north",
         help="Add local-north polarisation columns (_corr) and pol_frame_gamma",
     )
     _add_write_args(pol)
     pol.add_argument(
         "--boresights",
         type=Path,
-        default=_default(PolframeOptions, "boresights"),
+        default=_default(RotateToLocalNorthOptions, "boresights"),
         help="CSV with FIELD_NAME, RA_DEG, DEC_DEG (default: the RACS-low3 fields)",
     )
-    pol.add_argument("--tile-col", default=_default(PolframeOptions, "tile_col"))
+    pol.add_argument(
+        "--tile-col", default=_default(RotateToLocalNorthOptions, "tile_col")
+    )
     pol.add_argument(
         "--angle-min", type=float, help="Lower edge of angle range, 0 or -90"
     )
     pol.add_argument(
         "--sep-tol-arcsec",
         type=float,
-        default=_default(PolframeOptions, "sep_tol_arcsec"),
+        default=_default(RotateToLocalNorthOptions, "sep_tol_arcsec"),
         help=(
-            f"Largest allowed difference from {_default(PolframeOptions, 'sep_col')} "
+            f"Largest allowed difference from {_default(RotateToLocalNorthOptions, 'sep_col')} "
             "(default: %(default)s; inf skips)"
         ),
     )
@@ -78,11 +83,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     write_options = WriteOptions(chunk_rows=args.chunk_rows, overwrite=args.overwrite)
     try:
-        if args.command == "polframe":
-            run_polframe(
+        if args.command == "rotate-to-local-north":
+            run_rotate_to_local_north(
                 args.catalogue,
                 args.output,
-                PolframeOptions(
+                RotateToLocalNorthOptions(
                     boresights=args.boresights,
                     tile_col=args.tile_col,
                     angle_min=args.angle_min,

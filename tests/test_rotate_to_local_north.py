@@ -14,7 +14,7 @@ from astropy.table import Table
 from conftest import CENTRES, SyntheticCatalogue, write_boresights
 from numpy.typing import NDArray
 from spice_racs_fix import fits_io, geometry
-from spice_racs_fix import polframe as pf
+from spice_racs_fix import rotate_to_local_north as rln
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,10 +40,10 @@ def test_end_to_end_preserves_everything(
 ) -> None:
     cat = make_catalogue(n_per_tile=250)
     out = tmp_path / "out.fits"
-    res = pf.run_polframe(
+    res = rln.run_rotate_to_local_north(
         cat.path,
         out,
-        pf.PolframeOptions(boresights=cat.boresights),
+        rln.RotateToLocalNorthOptions(boresights=cat.boresights),
         fits_io.WriteOptions(chunk_rows=77),  # uneven chunks
     )
     assert res.n_rows == len(cat.table)
@@ -86,8 +86,10 @@ def test_end_to_end_preserves_everything(
     assert np.isnan(np.ma.filled(got["polangle_corr"], np.nan)[3])  # null stays null
 
     with pytest.raises(fits_io.CatalogueError, match="twice"):
-        pf.run_polframe(
-            out, tmp_path / "again.fits", pf.PolframeOptions(boresights=cat.boresights)
+        rln.run_rotate_to_local_north(
+            out,
+            tmp_path / "again.fits",
+            rln.RotateToLocalNorthOptions(boresights=cat.boresights),
         )
 
 
@@ -98,8 +100,10 @@ def test_unknown_tile_aborts(
     name, (r0, d0) = next(iter(CENTRES.items()))
     write_boresights(cat.boresights, [(name, r0, d0)])  # drop the second tile
     with pytest.raises(fits_io.CatalogueError, match="no boresight"):
-        pf.run_polframe(
-            cat.path, tmp_path / "o.fits", pf.PolframeOptions(boresights=cat.boresights)
+        rln.run_rotate_to_local_north(
+            cat.path,
+            tmp_path / "o.fits",
+            rln.RotateToLocalNorthOptions(boresights=cat.boresights),
         )
 
 
@@ -112,7 +116,9 @@ def test_layout_change_stops_without_writing(
     out = tmp_path / "out.fits"
     monkeypatch.setattr(fits_io, "match_layout", lambda *_: "TFORM3 differs")
     with pytest.raises(fits_io.CatalogueError, match="TFORM3 differs"):
-        pf.run_polframe(cat.path, out, pf.PolframeOptions(boresights=cat.boresights))
+        rln.run_rotate_to_local_north(
+            cat.path, out, rln.RotateToLocalNorthOptions(boresights=cat.boresights)
+        )
     assert not out.exists()
 
 
@@ -152,7 +158,7 @@ def test_awkward_columns_copied_verbatim(tmp_path: Path) -> None:
             array=np.array([1.5, np.nan, 3, 4, 5, 6], dtype=">f4"),
         ),
     ]
-    opts = pf.PolframeOptions()
+    opts = rln.RotateToLocalNorthOptions()
     for nm in opts.angle_cols:
         cols.append(fits.Column(nm, "D", unit="deg", array=np.linspace(10, 170, n)))
     for nm in [c for pr in opts.qu_cols for c in pr] + list(opts.qu_err_cols):
@@ -165,7 +171,9 @@ def test_awkward_columns_copied_verbatim(tmp_path: Path) -> None:
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path)
     bore = write_boresights(tmp_path / "bore.csv", [("RACS_1200-30", 180.0, -30.0)])
 
-    pf.run_polframe(path, out, pf.PolframeOptions(boresights=bore))
+    rln.run_rotate_to_local_north(
+        path, out, rln.RotateToLocalNorthOptions(boresights=bore)
+    )
     with fits.open(path) as a, fits.open(out) as b:
         for k in ("TCOMM1", "TUCD1", "SURVEY", "TNULL5", "TZERO6", "TZERO7", "TDISP9"):
             assert b[1].header[k] == a[1].header[k], k
@@ -183,7 +191,9 @@ def test_separation_check(
 ) -> None:
     cat = make_catalogue(n_per_tile=40, with_sep=True)
     out = tmp_path / "out.fits"
-    res = pf.run_polframe(cat.path, out, pf.PolframeOptions(boresights=cat.boresights))
+    res = rln.run_rotate_to_local_north(
+        cat.path, out, rln.RotateToLocalNorthOptions(boresights=cat.boresights)
+    )
     assert res.max_sep_diff_arcsec is not None
     assert res.max_sep_diff_arcsec < 1e-3
     # a boresight 10 arcsec off, as a CSV from another epoch might give
@@ -196,11 +206,18 @@ def test_separation_check(
     write_boresights(cat.boresights, rows)
     overwrite = fits_io.WriteOptions(overwrite=True)
     with pytest.raises(fits_io.CatalogueError, match="different RACS epoch"):
-        pf.run_polframe(
-            cat.path, out, pf.PolframeOptions(boresights=cat.boresights), overwrite
+        rln.run_rotate_to_local_north(
+            cat.path,
+            out,
+            rln.RotateToLocalNorthOptions(boresights=cat.boresights),
+            overwrite,
         )
-    skip = pf.PolframeOptions(boresights=cat.boresights, sep_tol_arcsec=float("inf"))
-    pf.run_polframe(cat.path, out, skip, overwrite)  # check can be skipped
+    skip = rln.RotateToLocalNorthOptions(
+        boresights=cat.boresights, sep_tol_arcsec=float("inf")
+    )
+    rln.run_rotate_to_local_north(
+        cat.path, out, skip, overwrite
+    )  # check can be skipped
 
 
 def test_refuses_to_overwrite_input(
@@ -209,10 +226,10 @@ def test_refuses_to_overwrite_input(
     cat = make_catalogue(n_per_tile=20)
     before = cat.path.read_bytes()
     with pytest.raises(fits_io.CatalogueError, match="input"):
-        pf.run_polframe(
+        rln.run_rotate_to_local_north(
             cat.path,
             cat.path,
-            pf.PolframeOptions(boresights=cat.boresights),
+            rln.RotateToLocalNorthOptions(boresights=cat.boresights),
             fits_io.WriteOptions(overwrite=True),
         )
     assert cat.path.read_bytes() == before
@@ -220,12 +237,12 @@ def test_refuses_to_overwrite_input(
 
 def test_tile_names_decodes_each_distinct_value_once() -> None:
     col = np.array([b"RACS_A  ", b"RACS_B", b"RACS_A  ", b"", b"RACS_B"])
-    names, idx = pf.tile_names(col)
+    names, idx = rln.tile_names(col)
     assert list(names[idx]) == ["RACS_A", "RACS_B", "RACS_A", "", "RACS_B"]
     assert len(names) == 3
 
 
 def test_default_boresights_cover_racs_names() -> None:
-    centres = pf.read_boresights(pf.PolframeOptions().boresights)
+    centres = rln.read_boresights(rln.RotateToLocalNorthOptions().boresights)
     assert len(centres) > 1000
     assert all(name.startswith("RACS_") for name in centres)

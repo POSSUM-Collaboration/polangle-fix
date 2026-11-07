@@ -11,12 +11,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_polframe_command(
+def test_rotate_to_local_north_command(
     tmp_path: Path, make_catalogue: Callable[..., SyntheticCatalogue]
 ) -> None:
     cat = make_catalogue(n_per_tile=20)
     out = tmp_path / "out.fits"
-    args = ["polframe", str(cat.path), str(out), "--boresights", str(cat.boresights)]
+    args = [
+        "rotate-to-local-north",
+        str(cat.path),
+        str(out),
+        "--boresights",
+        str(cat.boresights),
+    ]
     assert cli.main([*args, "--chunk-rows", "7"]) == 0
     assert "pol_frame_gamma" in Table.read(out).colnames
     assert cli.main(args) == 1  # output exists
@@ -25,6 +31,12 @@ def test_polframe_command(
 
 def test_errors_become_exit_status(tmp_path: Path) -> None:
     assert (
-        cli.main(["polframe", str(tmp_path / "x.fits.gz"), str(tmp_path / "o.fits")])
+        cli.main(
+            [
+                "rotate-to-local-north",
+                str(tmp_path / "x.fits.gz"),
+                str(tmp_path / "o.fits"),
+            ]
+        )
         == 1
     )

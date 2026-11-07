@@ -28,12 +28,12 @@ uv add git+https://github.com/POSSUM-Collaboration/spice-racs-fix
 
 ## Steps
 
-### polframe
+### rotate-to-local-north
 
 Catalogue polarisation angles are measured from north at the tile boresight, not
-from north at each source. `polframe` adds local-north copies of the affected
-columns with a `_corr` suffix, plus `pol_frame_gamma`, the rotation applied
-(chi_true = chi + gamma):
+from north at each source. `rotate-to-local-north` adds local-north copies of
+the affected columns with a `_corr` suffix, plus `pol_frame_gamma`, the rotation
+applied (chi_true = chi + gamma):
 
 | Original                     | Corrected                              |
 | ---------------------------- | -------------------------------------- |
@@ -44,7 +44,7 @@ columns with a `_corr` suffix, plus `pol_frame_gamma`, the rotation applied
 
 ```bash
 gunzip spice-racs.dr2.fits.gz
-spice-racs-fix polframe spice-racs.dr2.fits spice-racs.dr2.polframe.fits
+spice-racs-fix rotate-to-local-north spice-racs.dr2.fits spice-racs.dr2.local-north.fits
 ```
 
 Boresights come from the RACS-low3 field list shipped with the package
@@ -57,12 +57,15 @@ From Python:
 ```python
 from pathlib import Path
 
-from spice_racs_fix.polframe import PolframeOptions, run_polframe
+from spice_racs_fix.rotate_to_local_north import (
+    RotateToLocalNorthOptions,
+    run_rotate_to_local_north,
+)
 
-result = run_polframe(
+result = run_rotate_to_local_north(
     Path("spice-racs.dr2.fits"),
-    Path("spice-racs.dr2.polframe.fits"),
-    PolframeOptions(),
+    Path("spice-racs.dr2.local-north.fits"),
+    RotateToLocalNorthOptions(),
 )
 ```
 
