@@ -23,12 +23,19 @@ def lint(session: nox.Session) -> None:
     )
 
 
-@nox.session
+@nox.session(venv_backend="uv")
 def tests(session: nox.Session) -> None:
     """
     Run the unit and regular tests.
     """
-    session.install(".[dev]")
+    # Install the locked dev group into the nox venv
+    session.run_install(
+        "uv",
+        "sync",
+        "--locked",
+        f"--python={session.virtualenv.location}",
+        env={"UV_PROJECT_ENVIRONMENT": session.virtualenv.location},
+    )
     session.run("pytest", *session.posargs)
 
 
@@ -42,5 +49,4 @@ def build(session: nox.Session) -> None:
     if build_path.exists():
         shutil.rmtree(build_path)
 
-    session.install("build")
-    session.run("python", "-m", "build")
+    session.run("uv", "build", external=True)

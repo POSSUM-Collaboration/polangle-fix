@@ -8,8 +8,22 @@ layout. Nothing is ever changed in place.
 
 ## Install
 
+As a command line tool:
+
 ```bash
-uv pip install git+https://github.com/POSSUM-Collaboration/spice-racs-fix
+uv tool install git+https://github.com/POSSUM-Collaboration/spice-racs-fix
+```
+
+Or run it once without installing:
+
+```bash
+uvx --from git+https://github.com/POSSUM-Collaboration/spice-racs-fix spice-racs-fix --help
+```
+
+As a dependency of your own project:
+
+```bash
+uv add git+https://github.com/POSSUM-Collaboration/spice-racs-fix
 ```
 
 ## Steps
@@ -59,6 +73,14 @@ against a source of known absolute angle.
 ## Development
 
 ```bash
-uv run --extra dev pytest
-uv run --extra dev prek run --all-files
+uv sync
+uv run pytest
+uv run prek run --hook-stage manual --all-files
 ```
+
+`uv run prek install` sets up the git hook. The version comes from git tags
+through hatch-vcs, so a release is a `vX.Y.Z` tag on `main`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

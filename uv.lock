@@ -915,7 +915,7 @@ dependencies = [
     { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "nox" },
@@ -929,16 +929,19 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "astropy", specifier = ">=6" },
-    { name = "mypy", marker = "extra == 'dev'" },
-    { name = "nox", marker = "extra == 'dev'" },
     { name = "numpy", specifier = ">=1.22" },
-    { name = "prek", marker = "extra == 'dev'", specifier = ">=0.4.6" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "pytest-xdist", marker = "extra == 'dev'" },
-    { name = "ruff", marker = "extra == 'dev'" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy" },
+    { name = "nox" },
+    { name = "prek", specifier = ">=0.4.6" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+]
 
 [[package]]
 name = "typing-extensions"

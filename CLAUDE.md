@@ -12,13 +12,19 @@ boresights.
 
 ## Environment
 
-Use `uv run` for everything. Never call `pytest`/`mypy`/`ruff` bare.
+Use `uv run` for everything. Never call `pytest`/`mypy`/`ruff` bare. Dev tools
+are in the `dev` dependency group, which `uv run` and `uv sync` install by
+default. `uv.lock` is committed; change dependencies with `uv add`/`uv remove`.
+Hooks run with prek (`prek.toml`), not pre-commit.
+
+The version comes from git tags through hatch-vcs (`vX.Y.Z`). Never write a
+version number into the code.
 
 ## Verify gate (run before calling any task done)
 
 ```
-uv run --extra dev pytest tests/<touched modules>
-uv run --extra dev prek run --hook-stage manual --all-files
+uv run pytest tests/<touched modules>
+uv run prek run --hook-stage manual --all-files
 ```
 
 ## Design rules

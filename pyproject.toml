@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling>=1.27", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,6 +7,8 @@ name = "spice-racs-fix"
 dynamic = ["version"]
 description = "Corrections to the SPICE-RACS DR2 catalogue"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,7 +28,11 @@ dependencies = [
     "astropy>=6",
 ]
 
-[project.optional-dependencies]
+[project.urls]
+Homepage = "https://github.com/POSSUM-Collaboration/spice-racs-fix"
+Issues = "https://github.com/POSSUM-Collaboration/spice-racs-fix/issues"
+
+[dependency-groups]
 dev = [
     "ruff",
     "mypy",
@@ -42,7 +48,13 @@ spice-racs-fix = "spice_racs_fix.cli:main"
 
 [tool.hatch]
 version.source = "vcs"
+# Used when there is no git metadata, for example a GitHub source archive
+version.fallback-version = "0.0.0"
 build.hooks.vcs.version-file = "spice_racs_fix/_version.py"
+
+[tool.uv]
+# The version comes from git, so rebuild the project when the commit or tags change
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 
 [tool.ruff]
 src = ["spice_racs_fix"]
