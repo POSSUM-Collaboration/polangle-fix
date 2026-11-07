@@ -33,6 +33,9 @@ uv run prek run --hook-stage manual --all-files
   `fits_io.append_columns`; never change an original column in place.
 - A step is a function `table, Options -> StepResult` (new columns plus header
   cards), with a `run_<step>` wrapper that opens, checks and writes.
+- Names describe what the thing does. A step's CLI subcommand, module and
+  `run_<step>` say what it produces or changes (for example `errmodel`, not
+  `calibrate`). Avoid jargon that means something else in radio astronomy.
 - Corrected values take a `_corr` suffix. New systematic error terms take
   `_err_sys`.
 - Parameters come from SPICE-RACS data alone (for example same-source tile
