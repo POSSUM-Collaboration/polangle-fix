@@ -14,15 +14,15 @@ def get_logger(name: str = "spice-racs-fix") -> logging.Logger:
     Returns:
         The logger.
     """
-    log = logging.getLogger(name)
-    if not log.handlers:
+    package_logger = logging.getLogger(name)
+    if not package_logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(
             logging.Formatter("%(levelname)s %(module)s.%(funcName)s: %(message)s")
         )
-        log.addHandler(handler)
-        log.setLevel(logging.INFO)
-    return log
+        package_logger.addHandler(handler)
+        package_logger.setLevel(logging.INFO)
+    return package_logger
 
 
 logger = get_logger()

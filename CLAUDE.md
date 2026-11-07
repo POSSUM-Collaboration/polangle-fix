@@ -33,6 +33,10 @@ uv run prek run --hook-stage manual --all-files
   `fits_io.append_columns`; never change an original column in place.
 - A step is a function `table, Options -> StepResult` (new columns plus header
   cards), with a `run_<step>` wrapper that opens, checks and writes.
+- Every name is fully self-describing: steps, modules, functions, Options
+  fields, CLI flags, arguments and locals. Write words out (`separation`, not
+  `sep`; `rotation_deg`, not `gamma`; `catalogue`, not `cat`). Published output
+  column names and FITS keywords are data, not code, and stay as they are.
 - Names describe what the thing does. A step's CLI subcommand, module and
   `run_<step>` say what it produces or changes (for example `fit-error-model`,
   not `calibrate`). Avoid jargon that means something else in radio astronomy.

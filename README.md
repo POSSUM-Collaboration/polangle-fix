@@ -48,8 +48,8 @@ spice-racs-fix rotate-to-local-north spice-racs.dr2.fits spice-racs.dr2.local-no
 ```
 
 Boresights come from the RACS-low3 field list shipped with the package
-(`spice_racs_fix/data/field_data.csv`); pass `--boresights` to use another. If
-the catalogue has `separation_tile_centre`, every row is checked against its
+(`spice_racs_fix/data/field_data.csv`); pass `--boresight-csv` to use another.
+If the catalogue has `separation_tile_centre`, every row is checked against its
 boresight and the run stops if any row is more than 1 arcsec off.
 
 From Python:
