@@ -53,6 +53,11 @@ uv run prek run --hook-stage manual --all-files
   useful). NamedTuple fields and comments: terse one-liners (`"""Does X"""`).
 - Write like a human, not a manual. No over-explaining, no em/en dashes anywhere
   (docs, comments, commit messages, prose).
+- Plain English in all prose (docs, comments, commit messages, PR text). No
+  marketing words (seamless, powerful, first class, blazing fast) and no AI
+  filler (delve, crucial, leverage, ensure, it's worth noting). Write full
+  sentences, not clipped fragments, and say what something does rather than how
+  good it is. Technical terms such as "robust loss" are fine.
 - `from __future__ import annotations` required in every module (ruff isort
   enforces).
 - Python must be fully typed. mypy strict + `disallow_untyped_defs` on

@@ -73,7 +73,7 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
-      - name: Smoke test the wheel
+      - name: Check the wheel installs and runs
         run: >-
           uv run --isolated --no-project --with dist/*.whl spice-racs-fix --help
 
